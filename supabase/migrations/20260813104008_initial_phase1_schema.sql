@@ -114,6 +114,22 @@ create table public.funnels (
   )
 );
 
+-- 公開登録フォームの URL パラメータ（登録経路）と、付与するラベルの対応。
+-- 任意の label_id をクライアントから送らせず、サーバーで検証するための設定テーブル。
+create table public.registration_paths (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id uuid not null references public.tenants (id),
+  funnel_id uuid not null,
+  path text not null,
+  name text not null,
+  label_id uuid,
+  created_at timestamptz not null default now(),
+  unique (tenant_id, funnel_id, path),
+  unique (tenant_id, id),
+  foreign key (tenant_id, funnel_id) references public.funnels (tenant_id, id),
+  foreign key (tenant_id, label_id) references public.labels (tenant_id, id)
+);
+
 create table public.scenarios (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references public.tenants (id),
@@ -207,6 +223,7 @@ alter table public.delivery_accounts enable row level security;
 alter table public.readers enable row level security;
 alter table public.labels enable row level security;
 alter table public.reader_labels enable row level security;
+alter table public.registration_paths enable row level security;
 alter table public.funnels enable row level security;
 alter table public.scenarios enable row level security;
 alter table public.step_messages enable row level security;
@@ -235,6 +252,9 @@ create policy labels_tenant_access on public.labels
   for all to authenticated using (public.is_tenant_operator(tenant_id))
   with check (public.is_tenant_operator(tenant_id));
 create policy reader_labels_tenant_access on public.reader_labels
+  for all to authenticated using (public.is_tenant_operator(tenant_id))
+  with check (public.is_tenant_operator(tenant_id));
+create policy registration_paths_tenant_access on public.registration_paths
   for all to authenticated using (public.is_tenant_operator(tenant_id))
   with check (public.is_tenant_operator(tenant_id));
 create policy funnels_tenant_access on public.funnels

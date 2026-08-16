@@ -9,7 +9,14 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "probe": "node scripts/probe.mjs"
+    "probe": "node scripts/probe.mjs",
+    "probe:vercel": "node scripts/probe.mjs --vercel",
+    "supabase:check": "node --env-file=.env.local scripts/check-supabase.mjs",
+    "stripe:bootstrap-test": "node --env-file=.env.local scripts/bootstrap-stripe-test-product.mjs",
+    "stripe:check-purchase": "node --env-file=.env.local scripts/check-stripe-purchase.mjs",
+    "vercel:sync-production-env": "node --env-file=.env.local scripts/sync-vercel-production-env.mjs",
+    "stripe:provision-test-webhook": "node --env-file=.env.local scripts/provision-stripe-test-webhook.mjs",
+    "deliveries:deploy": "node --env-file=.env.local scripts/deploy-delivery-worker.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.4",

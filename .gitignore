@@ -37,6 +37,12 @@ yarn-error.log*
 # vercel
 .vercel
 
+# local release/runtime artifacts
+/.yonabe/
+/.lock
+/changes.patch
+/supabase/.temp/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

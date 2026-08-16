@@ -78,5 +78,13 @@ test('tenant-owned relationships use composite foreign keys', () => {
     /foreign key \(tenant_id, [a-z_]+\) references public\.[a-z_]+ \(tenant_id, id\)/g,
   );
   assert.ok(compositeForeignKeys, 'composite foreign keys should exist');
-  assert.equal(compositeForeignKeys.length, 16);
+  // registration_paths adds two tenant-scoped relationships to the Phase 1 schema.
+  assert.equal(compositeForeignKeys.length, 18);
+});
+
+test('registration paths are tenant-scoped, protected by RLS, and can grant a label', () => {
+  assert.match(sql, /create table public\.registration_paths \(/);
+  assert.match(sql, /alter table public\.registration_paths enable row level security;/);
+  assert.match(sql, /foreign key \(tenant_id, funnel_id\) references public\.funnels \(tenant_id, id\)/);
+  assert.match(sql, /foreign key \(tenant_id, label_id\) references public\.labels \(tenant_id, id\)/);
 });

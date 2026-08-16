@@ -1,0 +1,4 @@
+interface:
+  display_name: "SaaS Auth Probe"
+  short_description: "Vercel・Supabase・Resend・Stripeの接続確認"
+  default_prompt: "Use $saas-auth-probe to verify this project’s Vercel, Supabase Auth, Resend, and Stripe configuration safely."
