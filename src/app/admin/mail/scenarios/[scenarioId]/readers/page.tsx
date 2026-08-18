@@ -111,6 +111,10 @@ export default async function ScenarioReadersPage({
       <h1>{scenario.name} — 読者一覧</h1>
       <p>
         <Link href={`/admin/mail/scenarios/${scenarioId}`}>← シナリオ詳細に戻る</Link>
+        {" ／ "}
+        <Link href={`/admin/mail/scenarios/${scenarioId}/import`}>CSV一括追加</Link>
+        {" ／ "}
+        <a href={`/admin/mail/scenarios/${scenarioId}/export`}>CSVエクスポート</a>
       </p>
 
       <section className="admin-panel">
