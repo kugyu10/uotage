@@ -17,7 +17,7 @@ test('course page validates the access token and the purchase record before rend
   assert.match(coursePage, /from\("purchases"\)\.select\("id"\)/);
   assert.match(coursePage, /\.eq\("reader_id", reader\.id\)\.eq\("product_id", productId\)/);
   assert.match(coursePage, /if \(!purchase\) notFound\(\)/);
-  assert.match(coursePage, /if \(!product\?\.content_url\) notFound\(\)/);
+  assert.match(coursePage, /if \(!product\?\.content_url \|\| !isHttpUrl\(product\.content_url\)\) notFound\(\)/);
 });
 
 test('course page embeds the content URL without ever re-emitting the access token', () => {
