@@ -5,7 +5,8 @@ import { test } from 'node:test';
 const proxy = await readFile(new URL('../src/proxy.ts', import.meta.url), 'utf8');
 const admin = await readFile(new URL('../src/app/admin/page.tsx', import.meta.url), 'utf8');
 const layout = await readFile(new URL('../src/app/admin/layout.tsx', import.meta.url), 'utf8');
-const section = await readFile(new URL('../src/app/admin/[section]/page.tsx', import.meta.url), 'utf8');
+const sections = await Promise.all(['mail', 'courses', 'labels', 'settings'].map((name) =>
+  readFile(new URL(`../src/app/admin/${name}/page.tsx`, import.meta.url), 'utf8')));
 const server = await readFile(new URL('../src/lib/supabase/server.ts', import.meta.url), 'utf8');
 
 test('admin routes require a verified session and operator membership', () => {
@@ -15,7 +16,7 @@ test('admin routes require a verified session and operator membership', () => {
   assert.match(server, /from\("operators"\)/);
   assert.match(server, /if \(!operator\) redirect/);
   assert.match(admin, /requireOperator\(\)/);
-  assert.match(section, /requireOperator\(\)/);
+  for (const section of sections) assert.match(section, /requireOperator\(\)/);
   assert.match(layout, /requireOperator\(\)/);
 });
 
