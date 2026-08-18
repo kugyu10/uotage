@@ -110,7 +110,18 @@ export async function addReader(
   if (error || !Array.isArray(data) || data.length !== 1) {
     return { status: "error", message: "登録に失敗しました。時間をおいて再度お試しください。" };
   }
-  const enrollment = data[0] as { email: string };
+  const enrollment = data[0] as { email: string; initial_delivery_id: string | null };
+
+  // register_reader は1通目を即時送信前提の processing で作る。管理画面の個別追加は
+  // 即時送信しないため、queued に戻して通常の配信バッチに拾わせる。
+  if (enrollment.initial_delivery_id) {
+    await admin
+      .from("deliveries")
+      .update({ status: "queued", processing_started_at: null })
+      .eq("tenant_id", operator.tenant_id)
+      .eq("id", enrollment.initial_delivery_id)
+      .eq("status", "processing");
+  }
 
   const { data: reader } = await supabase
     .from("readers")

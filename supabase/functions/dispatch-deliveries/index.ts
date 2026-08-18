@@ -33,6 +33,8 @@ Deno.serve(async (request) => {
     target_delivery_id: targetDeliveryId,
   });
   if (error) return Response.json({ error: "claim failed" }, { status: 500 });
+  // 初回メール(src/lib/mail.ts)と同じ日本時間表記に合わせる。
+  const deadlineFormat = new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Tokyo" });
   let sent = 0; let failed = 0;
   for (const batch of chunks((data ?? []) as Delivery[], 100)) {
     const messages = batch.map((item) => {
@@ -41,7 +43,7 @@ Deno.serve(async (request) => {
       const memberUrl = item.product_id ? `${appUrl}/course/${item.product_id}?token=${encodeURIComponent(item.access_token)}` : appUrl;
       const body = replace(item.body, {
         "{{name}}": item.reader_name ?? "", "{{offer_url}}": offerUrl,
-        "{{booking_url}}": item.booking_url ?? "", "{{deadline}}": item.deadline_at,
+        "{{booking_url}}": item.booking_url ?? "", "{{deadline}}": deadlineFormat.format(new Date(item.deadline_at)),
         "{{unsubscribe_url}}": unsubscribeUrl, "{{member_url}}": memberUrl,
       });
       return { from: `${item.from_name} <${item.from_email}>`, to: [item.recipient], subject: item.subject,
