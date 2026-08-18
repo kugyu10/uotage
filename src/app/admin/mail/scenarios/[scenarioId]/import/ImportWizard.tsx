@@ -104,7 +104,7 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
                   <>
                     <br />
                     <label>
-                      配信を開始する日時（この時刻より後のステップのみキューに積む）
+                      シナリオ登録日時（各ステップの送信予定と期限はこの日時を起点に計算し、インポート時点で送信予定が過ぎているステップはキューに積みません）
                       <br />
                       <input type="datetime-local" name="registeredAt" required />
                     </label>
