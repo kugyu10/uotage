@@ -35,6 +35,7 @@ const projectRef = required("SUPABASE_PROJECT_REF");
 const supabaseUrl = required("NEXT_PUBLIC_SUPABASE_URL").replace(/\/$/, "");
 const functionUrl = `${supabaseUrl}/functions/v1/dispatch-deliveries`;
 const sendNow = process.argv.includes("--send-now");
+const probe = process.argv.includes("--probe");
 const deliveryId = option("delivery-id");
 if (sendNow && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId ?? "")) {
   console.error("--send-now には --delivery-id <queued delivery UUID> が必要です。");
@@ -46,14 +47,15 @@ console.log(JSON.stringify({
   projectRef,
   function: "dispatch-deliveries",
   appUrl: appUrl.replace(/\/$/, ""),
-  invokeAfterDeploy: sendNow,
+  configureCron: "dispatch-deliveries-every-minute (* * * * *)",
+  invokeAfterDeploy: sendNow || probe,
   targetedDeliveryId: deliveryId ?? null,
   secretHandling: "一時ファイルにのみ作成し、終了時に削除。値は表示しません。",
 }, null, 2));
 
 if (process.argv.includes("--dry-run")) process.exit(0);
 if (!process.argv.includes("--confirm")) {
-  console.error("内容を確認後、--confirm を付けてください。--send-now と --delivery-id を付けると、指定したキュー済みメールを一度だけ送信します。");
+  console.error("内容を確認後、--confirm を付けてください。--probe は期限到来済みの配信を処理し、--send-now と --delivery-id は指定したキュー済みメールだけを処理します。");
   process.exit(66);
 }
 
@@ -71,12 +73,33 @@ try {
   await run("supabase", ["functions", "deploy", "dispatch-deliveries", "--no-verify-jwt", "--project-ref", projectRef]);
   await run("supabase", ["secrets", "set", "--project-ref", projectRef, "--env-file", secretFile]);
 
-  if (!sendNow) {
-    console.log("配信ワーカーをデプロイして環境変数を設定しました。実送信は行っていません。");
+  const serviceRoleKey = required("SUPABASE_SERVICE_ROLE_KEY");
+  const cronResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/configure_delivery_cron`, {
+    method: "POST",
+    headers: {
+      apikey: serviceRoleKey,
+      authorization: `Bearer ${serviceRoleKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ p_project_url: supabaseUrl, p_cron_secret: cronSecret }),
+  });
+  if (!cronResponse.ok) {
+    throw new Error(`配信cronの構成に失敗しました (HTTP ${cronResponse.status})。migrationが反映済みか確認してください。`);
+  }
+  const cronJobId = await cronResponse.json();
+  if (!Number.isInteger(cronJobId)) throw new Error("配信cronの構成結果が不正です");
+  console.log(`配信cronを1分間隔で構成しました: job ${cronJobId}`);
+
+  if (!sendNow && !probe) {
+    console.log("配信ワーカーをデプロイして環境変数を設定しました。直接起動は行っていません。");
   } else {
     const response = await fetch(functionUrl, {
       method: "POST",
-      headers: { authorization: `Bearer ${cronSecret}`, "content-type": "application/json", "x-uotage-delivery-id": deliveryId },
+      headers: {
+        authorization: `Bearer ${cronSecret}`,
+        "content-type": "application/json",
+        ...(deliveryId ? { "x-uotage-delivery-id": deliveryId } : {}),
+      },
       body: "{}",
     });
     const body = await response.text();

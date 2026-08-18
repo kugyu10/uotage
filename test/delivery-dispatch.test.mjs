@@ -5,6 +5,7 @@ import { test } from 'node:test';
 const sql = (await readFile(new URL('../supabase/migrations/20260815030000_delivery_dispatch_claim.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
 const purchaseSkipFix = (await readFile(new URL('../supabase/migrations/20260815040000_purchase_delivery_skip_fix.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
 const targetedClaim = (await readFile(new URL('../supabase/migrations/20260815050000_targeted_delivery_claim.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
+const cronConfiguration = (await readFile(new URL('../supabase/migrations/20260817010000_configure_delivery_cron.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
 const edge = await readFile(new URL('../supabase/functions/dispatch-deliveries/index.ts', import.meta.url), 'utf8');
 const deployScript = await readFile(new URL('../scripts/deploy-delivery-worker.mjs', import.meta.url), 'utf8');
 const registration = await readFile(new URL('../src/app/api/registrations/route.ts', import.meta.url), 'utf8');
@@ -51,4 +52,18 @@ test('delivery deployment keeps its worker secret out of logs and removes tempor
   assert.match(deployScript, /await rm\(secretDir, \{ recursive: true, force: true \}\)/);
   assert.doesNotMatch(deployScript, /console\.log\([^\n]*cronSecret/);
   assert.doesNotMatch(deployScript, /SUPABASE_SERVICE_ROLE_KEY=\$\{required/);
+});
+
+test('delivery deployment synchronizes one secret to Vault and a one-minute cron job', () => {
+  assert.match(cronConfiguration, /create extension if not exists pg_cron/);
+  assert.match(cronConfiguration, /create extension if not exists pg_net/);
+  assert.match(cronConfiguration, /vault\.update_secret/);
+  assert.match(cronConfiguration, /cron\.unschedule/);
+  assert.match(cronConfiguration, /dispatch-deliveries-every-minute/);
+  assert.match(cronConfiguration, /'\* \* \* \* \*'/);
+  assert.match(cronConfiguration, /timeout_milliseconds := 15000/);
+  assert.match(cronConfiguration, /grant execute on function public\.configure_delivery_cron\(text, text\) to service_role/);
+  assert.match(deployScript, /rest\/v1\/rpc\/configure_delivery_cron/);
+  assert.match(deployScript, /p_cron_secret: cronSecret/);
+  assert.doesNotMatch(cronConfiguration, /[a-za-z0-9_-]{40,}/);
 });
