@@ -100,6 +100,17 @@ h1 { margin: 8px 0 16px; font-size: clamp(2rem, 6vw, 3.25rem); line-height: 1.25
 .admin-placeholder-buttons code { color: var(--accent); font-size: .78rem; }
 
 .admin-preview-body { white-space: pre-wrap; padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-family: inherit; line-height: 1.7; }
+.admin-filters, .admin-add-form { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; }
+.admin-filters label, .admin-add-form label { display: grid; gap: 6px; font-weight: 600; font-size: .9rem; }
+.admin-filters input, .admin-filters select, .admin-add-form input { min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--ink); background: #0a1322; font: inherit; }
+.admin-filters button, .admin-add-form button { min-height: 42px; padding: 0 20px; border: 0; border-radius: 8px; color: #06201d; background: var(--accent); font: inherit; font-weight: 700; cursor: pointer; }
+.admin-add-form button:disabled { opacity: .65; cursor: wait; }
+.admin-add-form { margin-bottom: 8px; }
+.admin-note { flex-basis: 100%; margin: 4px 0 0; color: var(--muted); font-size: .82rem; line-height: 1.7; }
+.admin-table-wrap { overflow-x: auto; }
+.admin-dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 20px; }
+.admin-dl dt { color: var(--muted); }
+.admin-dl dd { margin: 0; }
 
 @theme inline {
   --color-background: var(--paper);
