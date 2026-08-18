@@ -5,7 +5,7 @@ import { test } from 'node:test';
 const proxy = await readFile(new URL('../src/proxy.ts', import.meta.url), 'utf8');
 const admin = await readFile(new URL('../src/app/admin/page.tsx', import.meta.url), 'utf8');
 const layout = await readFile(new URL('../src/app/admin/layout.tsx', import.meta.url), 'utf8');
-const section = await readFile(new URL('../src/app/admin/[section]/page.tsx', import.meta.url), 'utf8');
+const section = await readFile(new URL('../src/app/admin/mail/page.tsx', import.meta.url), 'utf8');
 const server = await readFile(new URL('../src/lib/supabase/server.ts', import.meta.url), 'utf8');
 
 test('admin routes require a verified session and operator membership', () => {
