@@ -22,6 +22,8 @@ h1 { margin: 8px 0 16px; font-size: clamp(2rem, 6vw, 3.25rem); line-height: 1.25
 .primary-link, .public-card-page button { display: inline-flex; min-height: 48px; align-items: center; justify-content: center; padding: 10px 22px; border: 0; border-radius: 8px; color: #06201d; background: var(--accent); font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }
 .checkout-button { display: inline-flex; min-height: 52px; margin-top: 22px; align-items: center; justify-content: center; padding: 10px 22px; border: 0; border-radius: 8px; color: #06201d; background: var(--accent); font: inherit; font-weight: 700; cursor: pointer; }
 .checkout-button:disabled { opacity: .65; cursor: wait; }
+.video-embed { margin-top: 24px; }
+.video-embed iframe { width: 100%; aspect-ratio: 16 / 9; border: 0; border-radius: 12px; }
 .admin-shell { min-height: 100vh; background: var(--paper); }
 .admin-shell header { display: flex; align-items: center; gap: 40px; padding: 18px 32px; color: #fff; background: #0f172a; }
 .admin-shell nav { display: flex; flex-wrap: wrap; gap: 22px; }.admin-shell nav a { color: #e2e8f0; text-decoration: none; }
