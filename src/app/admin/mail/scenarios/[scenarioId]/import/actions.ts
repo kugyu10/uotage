@@ -186,6 +186,7 @@ export async function confirmImport(
     custom_fields: row.customFields,
     access_token: createUrlToken(),
     unsubscribe_token: createUrlToken(),
+    unsubscribed: row.unsubscribed,
   }));
 
   const admin = createAdminClient();

@@ -3,8 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 const skipFix = (await readFile(new URL('../supabase/migrations/20260819030000_fix_skip_if_purchased.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
+const targetSkip = (await readFile(new URL('../supabase/migrations/20260819040000_target_product_skip_and_grant_label.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
+const importFix = (await readFile(new URL('../supabase/migrations/20260819050000_import_unsubscribed_and_initial_grant.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
 const edge = await readFile(new URL('../supabase/functions/dispatch-deliveries/index.ts', import.meta.url), 'utf8');
 const addAction = await readFile(new URL('../src/app/admin/mail/scenarios/[scenarioId]/readers/actions.ts', import.meta.url), 'utf8');
+const importRows = await readFile(new URL('../src/lib/csv/import-rows.ts', import.meta.url), 'utf8');
+const importAction = await readFile(new URL('../src/app/admin/mail/scenarios/[scenarioId]/import/actions.ts', import.meta.url), 'utf8');
+const registrationRoute = await readFile(new URL('../src/app/api/registrations/route.ts', import.meta.url), 'utf8');
 
 test('skip_if_purchased no longer joins purchases through the registration funnel product', () => {
   // 登録ファネルは product_id が必ず NULL のため、旧述語は恒偽だった。
@@ -17,6 +22,32 @@ test('skip_if_purchased no longer joins purchases through the registration funne
 test('dispatch worker renders {{deadline}} in Japan time instead of the raw timestamptz', () => {
   assert.match(edge, /Intl\.DateTimeFormat\("ja-JP",.*timeZone: "Asia\/Tokyo"/);
   assert.match(edge, /"\{\{deadline\}\}": deadlineFormat\.format\(new Date\(item\.deadline_at\)\)/);
+});
+
+test('skip_if_purchased targets the funnel product when one is set', () => {
+  // 対象商品が設定された登録ファネルは、その商品の購入のみでスキップする(4.3-4)。
+  assert.match(targetSkip, /drop constraint if exists funnels_registration_forbids_product/);
+  assert.match(targetSkip, /target_funnel\.product_id is null or purchase\.product_id = target_funnel\.product_id/);
+});
+
+test('grant_label_id is applied after sending, in both delivery paths', () => {
+  // 配信ワーカー経由
+  assert.match(targetSkip, /step\.grant_label_id/);
+  assert.match(edge, /grant_label_id/);
+  assert.match(edge, /from\("reader_labels"\)\.upsert\(/);
+  // 登録フォーム経由の1通目(即時送信)
+  assert.match(importFix, /initial_grant_label_id/);
+  assert.match(registrationRoute, /initial_grant_label_id/);
+  assert.match(registrationRoute, /from\("reader_labels"\)\.upsert\(/);
+});
+
+test('CSV import honors the 解除状況 column instead of discarding it', () => {
+  assert.match(importRows, /header\.indexOf\("解除状況"\)/);
+  assert.match(importRows, /=== "解除済み"/);
+  assert.match(importAction, /unsubscribed: row\.unsubscribed/);
+  // 解除済み読者: unsubscribed_at を設定し(既存値は維持)、deliveries は積まない。
+  assert.match(importFix, /coalesce\(unsubscribed_at, execution_time\)/);
+  assert.match(importFix, /and selected_reader\.unsubscribed_at is null/);
 });
 
 test('manual reader addition releases the pre-claimed first delivery back to the queue', () => {

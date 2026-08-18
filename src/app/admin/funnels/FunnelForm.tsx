@@ -41,7 +41,7 @@ export function FunnelForm({
         </select>
       </label>
       <label>
-        対象商品（購入トリガー時のみ必須）
+        対象商品（購入トリガーは必須。登録トリガーでは任意 — 「購入済みには送らない」の判定対象）
         <select name="product_id" defaultValue={initial?.product_id ?? ""}>
           <option value="">未選択</option>
           {products.map((product) => (

@@ -46,7 +46,9 @@ function parseFunnelInput(formData: FormData): FunnelInput {
     name,
     slug,
     triggerType,
-    productId: triggerType === "purchase" ? productId : null,
+    // 登録トリガーでも任意で「対象商品(訴求する商品)」を持てる。
+    // 「購入済みには送らない」(4.3-4) の判定対象になる。
+    productId: productId || null,
     deadlineHours: Math.trunc(deadlineHours),
     bookingUrl: bookingUrl || null,
     isActive,

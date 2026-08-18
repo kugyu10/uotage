@@ -6,6 +6,7 @@ type Delivery = {
   access_token: string; unsubscribe_token: string; subject: string; body: string;
   from_name: string; from_email: string; legal_footer: string; funnel_slug: string | null;
   booking_url: string | null; deadline_at: string; product_id: string | null;
+  tenant_id: string; reader_id: string; grant_label_id: string | null;
 };
 
 const required = (name: string) => {
@@ -61,6 +62,15 @@ Deno.serve(async (request) => {
       await Promise.all(batch.map((item, index) => supabase.from("deliveries").update({ status: "sent", sent_at: new Date().toISOString(),
         resend_message_id: result.data?.[index]?.id, processing_started_at: null }).eq("id", item.delivery_id).eq("status", "processing")));
       sent += batch.length;
+      // アクション管理(4.2.2): 送信後に付与するラベル。付与失敗は送信自体を巻き戻さない。
+      const grants = batch.filter((item) => item.grant_label_id);
+      if (grants.length > 0) {
+        const { error: grantError } = await supabase.from("reader_labels").upsert(
+          grants.map((item) => ({ tenant_id: item.tenant_id, reader_id: item.reader_id, label_id: item.grant_label_id })),
+          { onConflict: "reader_id,label_id", ignoreDuplicates: true },
+        );
+        if (grantError) console.error("[dispatch-deliveries] grant label failed", grantError.message);
+      }
     } catch (batchError) {
       await Promise.all(batch.map((item) => supabase.from("deliveries").update({
         status: item.attempt_count >= 3 ? "failed" : "queued", processing_started_at: null,

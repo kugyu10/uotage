@@ -11,6 +11,8 @@ export interface NormalizedImportRow {
   registrationPath: string | null;
   labels: string[];
   customFields: Record<string, string>;
+  /** 「解除状況」列が解除済みを示す行。deliveries を積まず unsubscribed_at を設定する。 */
+  unsubscribed: boolean;
 }
 
 export interface InvalidImportRow {
@@ -43,6 +45,7 @@ export function parseImportCsv(text: string): ParsedImportCsv {
   const nameIndex = header.indexOf("名前");
   const pathIndex = header.indexOf("登録経路");
   const labelIndex = header.indexOf("ラベル");
+  const unsubscribedIndex = header.indexOf("解除状況");
   // 未知のカラム（10.1/10.2で定義済みの固定カラム以外）は custom_fields に格納する。
   const customColumns = header
     .map((columnName, index) => ({ columnName, index }))
@@ -95,7 +98,10 @@ export function parseImportCsv(text: string): ParsedImportCsv {
       if (value.length > 0) customFields[columnName] = value;
     }
 
-    rows.push({ line, email, name, registrationPath, labels: rowLabels, customFields });
+    const unsubscribed =
+      unsubscribedIndex >= 0 && (raw[unsubscribedIndex] ?? "").trim() === "解除済み";
+
+    rows.push({ line, email, name, registrationPath, labels: rowLabels, customFields, unsubscribed });
   }
 
   return { rows, invalidRows, labels };

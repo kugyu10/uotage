@@ -13,6 +13,7 @@ type Enrollment = {
   email: string; name: string | null; access_token: string; unsubscribe_token: string;
   funnel_slug: string; deadline_at: string; subject: string | null; body: string | null;
   initial_delivery_id: string | null; product_id: string | null;
+  reader_id: string; initial_grant_label_id: string | null;
 };
 
 export async function POST(request: Request) {
@@ -68,6 +69,13 @@ export async function POST(request: Request) {
           .eq("id", enrollment.initial_delivery_id).eq("status", "processing");
         if (updateError) {
           return Response.json({ ok: true, message: "登録しました。送信記録の確定が遅れています。" }, { status: 202 });
+        }
+        // アクション管理(4.2.2): 1通目は即時送信のため、ここで送信後ラベルを付与する。
+        if (enrollment.initial_grant_label_id) {
+          await supabase.from("reader_labels").upsert(
+            { tenant_id: serverEnv.defaultTenantId, reader_id: enrollment.reader_id, label_id: enrollment.initial_grant_label_id },
+            { onConflict: "reader_id,label_id", ignoreDuplicates: true },
+          );
         }
       }
     } catch (error) {
