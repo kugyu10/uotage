@@ -12,7 +12,7 @@ export const runtime = "nodejs";
 type Enrollment = {
   email: string; name: string | null; access_token: string; unsubscribe_token: string;
   funnel_slug: string; deadline_at: string; subject: string | null; body: string | null;
-  initial_delivery_id: string | null;
+  initial_delivery_id: string | null; product_id: string | null;
 };
 
 export async function POST(request: Request) {
@@ -59,7 +59,7 @@ export async function POST(request: Request) {
         to: enrollment.email, name: enrollment.name, subject: enrollment.subject,
         body: enrollment.body, accessToken: enrollment.access_token,
         unsubscribeToken: enrollment.unsubscribe_token, funnelSlug: enrollment.funnel_slug,
-        deadlineAt: enrollment.deadline_at,
+        deadlineAt: enrollment.deadline_at, productId: enrollment.product_id,
       });
       if (enrollment.initial_delivery_id) {
         const { error: updateError } = await supabase.from("deliveries")

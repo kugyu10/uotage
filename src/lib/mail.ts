@@ -13,6 +13,7 @@ type InitialMail = {
   unsubscribeToken: string;
   funnelSlug: string;
   deadlineAt: string;
+  productId: string | null;
 };
 
 function escapeHtml(value: string) {
@@ -34,6 +35,7 @@ export async function sendInitialMail(mail: InitialMail) {
   const offerUrl = `${appUrl}/offer/${encodeURIComponent(mail.funnelSlug)}?token=${encodeURIComponent(mail.accessToken)}`;
   const unsubscribeUrl = `${appUrl}/unsubscribe?u=${encodeURIComponent(mail.unsubscribeToken)}`;
   const oneClickUnsubscribeUrl = `${appUrl}/api/unsubscribe?u=${encodeURIComponent(mail.unsubscribeToken)}`;
+  const memberUrl = mail.productId ? `${appUrl}/course/${mail.productId}?token=${encodeURIComponent(mail.accessToken)}` : appUrl;
   const deadline = new Intl.DateTimeFormat("ja-JP", {
     dateStyle: "medium",
     timeStyle: "short",
@@ -45,6 +47,7 @@ export async function sendInitialMail(mail: InitialMail) {
     "{{booking_url}}": offerUrl,
     "{{deadline}}": deadline,
     "{{unsubscribe_url}}": unsubscribeUrl,
+    "{{member_url}}": memberUrl,
   };
   const rendered = Object.entries(variables).reduce(
     (body, [variable, value]) => body.replaceAll(variable, value),

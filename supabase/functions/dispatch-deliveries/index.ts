@@ -5,7 +5,7 @@ type Delivery = {
   delivery_id: string; attempt_count: number; recipient: string; reader_name: string | null;
   access_token: string; unsubscribe_token: string; subject: string; body: string;
   from_name: string; from_email: string; legal_footer: string; funnel_slug: string | null;
-  booking_url: string | null; deadline_at: string;
+  booking_url: string | null; deadline_at: string; product_id: string | null;
 };
 
 const required = (name: string) => {
@@ -38,10 +38,11 @@ Deno.serve(async (request) => {
     const messages = batch.map((item) => {
       const offerUrl = item.funnel_slug ? `${appUrl}/offer/${encodeURIComponent(item.funnel_slug)}?token=${encodeURIComponent(item.access_token)}` : appUrl;
       const unsubscribeUrl = `${appUrl}/unsubscribe?u=${encodeURIComponent(item.unsubscribe_token)}`;
+      const memberUrl = item.product_id ? `${appUrl}/course/${item.product_id}?token=${encodeURIComponent(item.access_token)}` : appUrl;
       const body = replace(item.body, {
         "{{name}}": item.reader_name ?? "", "{{offer_url}}": offerUrl,
         "{{booking_url}}": item.booking_url ?? "", "{{deadline}}": item.deadline_at,
-        "{{unsubscribe_url}}": unsubscribeUrl,
+        "{{unsubscribe_url}}": unsubscribeUrl, "{{member_url}}": memberUrl,
       });
       return { from: `${item.from_name} <${item.from_email}>`, to: [item.recipient], subject: item.subject,
         text: `${body}\n\n${item.legal_footer}\n${unsubscribeUrl}`,
