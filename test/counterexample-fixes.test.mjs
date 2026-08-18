@@ -50,6 +50,19 @@ test('CSV import honors the 解除状況 column instead of discarding it', () =>
   assert.match(importFix, /and selected_reader\.unsubscribed_at is null/);
 });
 
+test('re-registration resends the first mail and unsubscribed readers get nothing', async () => {
+  const registerV4 = (await readFile(
+    new URL('../supabase/migrations/20260819060000_register_reader_resend_and_unsubscribed.sql', import.meta.url),
+    'utf8',
+  )).replace(/\s+/g, ' ').toLowerCase();
+  // 重複登録(4.1-2): 1通目をprocessingに戻して既存送信パスで再送する(期限はリセットしない)。
+  assert.match(registerV4, /had_enrollment/);
+  assert.match(registerV4, /status in \('sent', 'queued', 'failed', 'skipped'\)/);
+  // 解除済み読者(4.3-4): deliveriesを積まず、1通目の送信材料も返さない。
+  assert.match(registerV4, /if selected_reader\.unsubscribed_at is null then/);
+  assert.match(registerV4, /and selected_reader\.unsubscribed_at is null order by step\.position/);
+});
+
 test('manual reader addition releases the pre-claimed first delivery back to the queue', () => {
   // register_reader は1通目を即時送信前提の processing で作るため、
   // 即時送信しない個別追加では queued に戻さないと10分間スタックする。
