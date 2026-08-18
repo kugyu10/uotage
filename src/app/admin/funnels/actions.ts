@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+import { isHttpUrl } from "@/lib/safe-url";
 import { requireOperator } from "@/lib/supabase/server";
 
 type FunnelInput = {
@@ -36,6 +37,9 @@ function parseFunnelInput(formData: FormData): FunnelInput {
   }
   if (triggerType === "purchase" && !productId) {
     throw new Error("購入トリガーには対象商品が必要です");
+  }
+  if (bookingUrl && !isHttpUrl(bookingUrl)) {
+    throw new Error("予約URLは http(s) のURLを入力してください");
   }
 
   return {

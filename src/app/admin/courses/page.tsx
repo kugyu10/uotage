@@ -1,3 +1,4 @@
+import { isHttpUrl } from "@/lib/safe-url";
 import { requireOperator } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -33,7 +34,9 @@ export default async function CoursesPage() {
               {(courses ?? []).map((course) => (
                 <tr key={course.id}>
                   <td>{course.name}</td>
-                  <td><a href={course.content_url ?? "#"} target="_blank" rel="noreferrer">{course.content_url}</a></td>
+                  <td>{isHttpUrl(course.content_url)
+                    ? <a href={course.content_url} target="_blank" rel="noreferrer">{course.content_url}</a>
+                    : course.content_url}</td>
                 </tr>
               ))}
             </tbody>

@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
+import { isHttpUrl } from "@/lib/safe-url";
 import { requireOperator } from "@/lib/supabase/server";
 
 type ProductInput = {
@@ -22,6 +23,7 @@ function parseProductInput(formData: FormData): ProductInput {
 
   if (!name || name.length > 200) throw new Error("商品名を入力してください");
   if (!stripePriceId) throw new Error("Stripe Price IDを入力してください");
+  if (contentUrl && !isHttpUrl(contentUrl)) throw new Error("コースURLは http(s) のURLを入力してください");
 
   return {
     name,
