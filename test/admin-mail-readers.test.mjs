@@ -90,13 +90,11 @@ test('deliveries log is scoped to this scenario via scenario_readers, ordered ne
   assert.match(deliveriesPage, /deliveriesQuery\.eq\("status", statusFilter\)/);
 });
 
-test('reader pages link back to the shared scenario detail route without implementing it', async () => {
+test('reader pages link back to the shared scenario detail route', async () => {
   for (const source of [readersPage, readerDetailPage, deliveriesPage]) {
     assert.match(source, /<Link href={`\/admin\/mail\/scenarios\/\$\{scenarioId\}`}>/);
   }
-  // The scenario list/detail routes belong to another workstream — this route must not exist here.
-  await assert.rejects(
-    readFile(new URL('../src/app/admin/mail/scenarios/[scenarioId]/page.tsx', import.meta.url), 'utf8'),
-    /ENOENT/,
-  );
+  const scenarioDetail = await readFile(
+    new URL('../src/app/admin/mail/scenarios/[scenarioId]/page.tsx', import.meta.url), 'utf8');
+  assert.match(scenarioDetail, /requireOperator\(\)/);
 });
