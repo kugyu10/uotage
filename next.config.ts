@@ -6,6 +6,16 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: __dirname,
   },
+  experimental: {
+    serverActions: {
+      // CSVインポートは Server Action 経由で動く。既定の1MBでは
+      //   1. ドライランの5MBまでのCSVアップロード（multipart）
+      //   2. 確定実行で `.bind()` により暗号化されて戻る検証済み行（最大5,000行）
+      // のどちらも通らない。5MB + multipartのオーバーヘッド + 暗号化による膨張を
+      // 見込んで8MBにする。行数上限は src/lib/csv/import-batches.ts 側で縛る。
+      bodySizeLimit: "8mb",
+    },
+  },
   async headers() {
     return [
       {

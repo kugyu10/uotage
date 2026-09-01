@@ -1,48 +1,16 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import { test } from 'node:test';
-import ts from 'typescript';
 
-// --- 依存関係を持つ src/lib/csv/*.ts を、相対importを解決しながらCommonJSとしてロードする ---
-// registration.test.mjs のように単一ファイルをdata: URLで読み込む方式は、
-// これらのモジュールが相互に相対importを持つため使えない（data: URLはファイルパス解決を持たない）。
-// そのため、ここでは transpile 済みソースを小さな自前CommonJSローダーで結び付ける。
-const csvDir = fileURLToPath(new URL('../src/lib/csv/', import.meta.url));
-const moduleCache = new Map();
-
-function loadCsvModule(nameWithoutExt) {
-  const fullPath = path.join(csvDir, `${nameWithoutExt}.ts`);
-  if (moduleCache.has(fullPath)) return moduleCache.get(fullPath).exports;
-
-  const source = readFileSync(fullPath, 'utf8');
-  const { outputText } = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-  });
-
-  const mod = { exports: {} };
-  moduleCache.set(fullPath, mod);
-
-  const localRequire = (specifier) => {
-    if (specifier.startsWith('./') || specifier.startsWith('../')) {
-      const resolved = specifier.replace(/^\.\//, '').replace(/\.js$/, '');
-      return loadCsvModule(resolved);
-    }
-    throw new Error(`unexpected external require in csv module: ${specifier}`);
-  };
-
-  const compiled = new Function('exports', 'require', 'module', '__filename', '__dirname', outputText);
-  compiled(mod.exports, localRequire, mod, fullPath, csvDir);
-  return mod.exports;
-}
-
-const { parseCsv } = loadCsvModule('parse');
-const { formatCsvField, sanitizeCsvCell, buildCsv, UTF8_BOM } = loadCsvModule('format');
-const { formatJstDateTime, jstDatetimeLocalToUtcIso } = loadCsvModule('timezone');
-const { parseImportCsv } = loadCsvModule('import-rows');
-const { buildScenarioExportCsv } = loadCsvModule('export-rows');
+// src/lib/csv/*.ts は相対importに拡張子(.ts)を明記しているため、
+// `node --test --experimental-strip-types` から直接importできる。
+// 以前はここに transpile 用の自前CommonJSローダーを置いていたが、
+// 拡張子を明記したことで不要になった（test/unit/*.ts と同じ方式に統一）。
+import { parseCsv } from '../src/lib/csv/parse.ts';
+import { formatCsvField, sanitizeCsvCell, buildCsv, UTF8_BOM } from '../src/lib/csv/format.ts';
+import { formatJstDateTime, jstDatetimeLocalToUtcIso } from '../src/lib/csv/timezone.ts';
+import { parseImportCsv } from '../src/lib/csv/import-rows.ts';
+import { buildScenarioExportCsv } from '../src/lib/csv/export-rows.ts';
 
 // --- 静的アサーション対象ファイル ---
 const importRpcSql = (

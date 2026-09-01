@@ -1,5 +1,5 @@
-import { parseCsv } from "./parse";
-import { KNOWN_CSV_HEADERS } from "./columns";
+import { parseCsv } from "./parse.ts";
+import { KNOWN_CSV_HEADERS } from "./columns.ts";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 

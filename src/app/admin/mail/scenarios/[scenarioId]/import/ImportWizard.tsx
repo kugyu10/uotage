@@ -2,6 +2,8 @@
 
 import { useActionState, useState } from "react";
 
+import { MAX_IMPORT_ROWS } from "@/lib/csv/import-batches";
+
 import {
   confirmImport,
   initialConfirmState,
@@ -18,10 +20,28 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
   const boundConfirmImport = confirmImport.bind(null, scenarioId, previewState.validRows ?? []);
   const [confirmState, confirmAction, confirmPending] = useActionState(boundConfirmImport, initialConfirmState);
 
-  if (confirmState.status === "done") {
+  // 確定実行はRPCを複数回に分けて呼ぶため、途中で失敗すると「先頭から一部だけ反映済み」
+  // という状態になる。done と partial で同じサマリを出しつつ、partial では
+  // どこまで進んだかと再実行が安全であることを明示する。
+  if (confirmState.status === "done" || confirmState.status === "partial") {
+    const isPartial = confirmState.status === "partial";
     return (
       <div>
-        <p>インポートが完了しました。</p>
+        {isPartial ? (
+          <div role="alert">
+            <p>{confirmState.error}</p>
+            <p>
+              先頭から{confirmState.processedRows}行目までは反映済みです（全{confirmState.totalRows}行）。
+              残りは取り込まれていません。
+            </p>
+            <p>
+              同じCSVでもう一度ドライランから実行してください。既に取り込まれた読者は
+              「既に登録済みのためスキップ」として扱われ、二重登録や再送は起きません。
+            </p>
+          </div>
+        ) : (
+          <p>インポートが完了しました。</p>
+        )}
         <ul>
           <li>新規作成した読者: {confirmState.createdReaders}件</li>
           <li>更新した読者: {confirmState.updatedReaders}件</li>
@@ -38,7 +58,7 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
       <form action={previewAction}>
         <p>
           <label>
-            CSVファイル（UTAGE互換、日本語ヘッダー）
+            CSVファイル（UTAGE互換、日本語ヘッダー / 5MB・{MAX_IMPORT_ROWS.toLocaleString("ja-JP")}行まで）
             <br />
             <input type="file" name="file" accept=".csv,text/csv" required />
           </label>
@@ -63,7 +83,7 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
 
           {previewState.invalidRows && previewState.invalidRows.length > 0 && (
             <div>
-              <h3>不正行（{previewState.invalidRows.length}件、取り込み対象外）</h3>
+              <h3>不正行（{previewState.invalidRowsTotal ?? previewState.invalidRows.length}件、取り込み対象外）</h3>
               <ul>
                 {previewState.invalidRows.map((row) => (
                   <li key={row.line}>
@@ -71,6 +91,9 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
                   </li>
                 ))}
               </ul>
+              {(previewState.invalidRowsTotal ?? 0) > previewState.invalidRows.length && (
+                <p>先頭{previewState.invalidRows.length}件のみ表示しています。</p>
+              )}
             </div>
           )}
 
