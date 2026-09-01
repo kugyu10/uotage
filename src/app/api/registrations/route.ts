@@ -52,7 +52,7 @@ export async function POST(request: Request) {
       if (enrollment.initial_delivery_id) {
         const { data: claimed, error: claimError } = await supabase.from("deliveries")
           .update({ processing_started_at: new Date().toISOString(), error_message: null })
-          .eq("id", enrollment.initial_delivery_id).eq("status", "processing")
+          .eq("tenant_id", serverEnv.defaultTenantId).eq("id", enrollment.initial_delivery_id).eq("status", "processing")
           .select("id").maybeSingle();
         if (claimError || !claimed) throw new Error("初回メールの送信準備に失敗しました。");
       }
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
         const { error: updateError } = await supabase.from("deliveries")
           .update({ status: "sent", sent_at: new Date().toISOString(), resend_message_id: sent.id,
             processing_started_at: null, error_message: null })
-          .eq("id", enrollment.initial_delivery_id).eq("status", "processing");
+          .eq("tenant_id", serverEnv.defaultTenantId).eq("id", enrollment.initial_delivery_id).eq("status", "processing");
         if (updateError) {
           return Response.json({ ok: true, message: "登録しました。送信記録の確定が遅れています。" }, { status: 202 });
         }
@@ -83,7 +83,7 @@ export async function POST(request: Request) {
         const message = error instanceof Error ? error.message : "初回メールの送信に失敗しました。";
         await supabase.from("deliveries")
           .update({ status: "queued", processing_started_at: null, error_message: message.slice(0, 1000) })
-          .eq("id", enrollment.initial_delivery_id).eq("status", "processing");
+          .eq("tenant_id", serverEnv.defaultTenantId).eq("id", enrollment.initial_delivery_id).eq("status", "processing");
       }
       return Response.json({ ok: true, message: "登録しました。メール配信が遅れています。" }, { status: 202 });
     }

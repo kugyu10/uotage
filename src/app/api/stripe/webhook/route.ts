@@ -26,12 +26,20 @@ export async function POST(request: Request) {
   const session = event.data.object;
   const email = session.customer_details?.email?.trim().toLowerCase();
   const productId = session.metadata?.product_id;
+  // ここから下の「処理しない」判定は、いずれも再送しても結果が変わらない。
+  // 2xx 以外を返すと Stripe が最大3日リトライし続け、エンドポイントの
+  // 失敗率が汚れて本当の障害が埋もれるため 200 で確定させる。
+  // 一時的な失敗(RPCエラー)だけ 5xx を返してリトライさせる。
   if (!email || !productId || session.payment_status !== "paid") {
-    return new Response("決済情報が不足しています。", { status: 400 });
+    // コンビニ決済など、支払い完了前に checkout.session.completed が届く非同期決済。
+    return Response.json({ received: true, ignored: "payment_incomplete_or_metadata_missing" });
   }
   // Checkout作成時のmetadataと現在の既定テナントが一致する場合だけ処理する。
   if (session.metadata?.tenant_id !== defaultTenantId()) {
-    return new Response("決済情報が一致しません。", { status: 400 });
+    console.warn("[stripe-webhook] テナント不一致のセッションを無視", {
+      eventId: event.id, sessionId: session.id,
+    });
+    return Response.json({ received: true, ignored: "tenant_mismatch" });
   }
   const { error } = await createAdminClient().rpc("process_stripe_purchase", {
     target_tenant_id: defaultTenantId(), product: productId,

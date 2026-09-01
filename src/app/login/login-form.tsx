@@ -10,10 +10,14 @@ export function LoginForm({ supabaseUrl, anonKey, callbackUrl }: { supabaseUrl: 
   return <form onSubmit={async (event) => {
     event.preventDefault(); if (!configured) return; setBusy(true); setMessage("");
     const email = new FormData(event.currentTarget).get("email");
-    const { error } = await createBrowserClient(supabaseUrl, anonKey).auth.signInWithOtp({
-      email: String(email), options: { emailRedirectTo: callbackUrl },
+    // オペレーターは招待制。shouldCreateUser を false にして、未招待アドレスで
+    // auth.users が作られたりメールが送られたりしないようにする。
+    await createBrowserClient(supabaseUrl, anonKey).auth.signInWithOtp({
+      email: String(email), options: { emailRedirectTo: callbackUrl, shouldCreateUser: false },
     });
-    setMessage(error ? "ログインメールを送信できませんでした。" : "ログイン用メールを送信しました。"); setBusy(false);
+    // 結果に関わらず同じ文言を返す。エラー内容を出し分けると
+    // 「そのアドレスが登録済みか」を外部から判定できてしまう。
+    setMessage("ログイン用メールを送信しました。登録済みのアドレスの場合のみ届きます。"); setBusy(false);
   }} className="registration-form">
     <label>メールアドレス<input name="email" type="email" required autoComplete="email" /></label>
     <button disabled={!configured || busy}>{busy ? "送信中…" : "ログイン用メールを送る"}</button>

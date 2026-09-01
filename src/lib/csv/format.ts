@@ -15,8 +15,12 @@ export function formatCsvRow(fields: string[]): string {
 /**
  * Excel/表計算ソフトが `=`, `+`, `-`, `@` で始まるセルを数式として実行してしまう
  * CSVインジェクションを防ぐため、該当する場合は先頭にシングルクォートを1つ付与する。
+ * タブ・CR も Excel が数式の先頭として解釈しうるため対象に含める（OWASP 準拠）。
+ *
+ * データ行だけでなくヘッダー行にも適用すること。カスタム項目の列名は
+ * インポートCSVのヘッダー由来、すなわち外部入力である。
  */
-const FORMULA_PREFIX_PATTERN = /^[=+\-@]/;
+const FORMULA_PREFIX_PATTERN = /^[=+\-@\t\r]/;
 export function sanitizeCsvCell(value: string): string {
   return FORMULA_PREFIX_PATTERN.test(value) ? `'${value}` : value;
 }

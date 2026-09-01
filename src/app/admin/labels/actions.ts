@@ -4,10 +4,21 @@ import { revalidatePath } from "next/cache";
 
 import { requireOperator } from "@/lib/supabase/server";
 
-export async function createLabel(formData: FormData): Promise<void> {
-  const { supabase, operator } = await requireOperator();
+/**
+ * CSV の「ラベル」列はカンマ区切り（要件定義書 10.1/10.2）なので、
+ * ラベル名自体にカンマを含めるとエクスポート→インポートの往復で
+ * 別々のラベルに分裂する。名前の側で禁止して往復を無損失にする。
+ */
+function parseLabelName(formData: FormData): string {
   const name = String(formData.get("name") ?? "").trim();
   if (!name || name.length > 100) throw new Error("ラベル名を入力してください");
+  if (name.includes(",")) throw new Error("ラベル名にカンマは使用できません");
+  return name;
+}
+
+export async function createLabel(formData: FormData): Promise<void> {
+  const { supabase, operator } = await requireOperator();
+  const name = parseLabelName(formData);
 
   const { error } = await supabase.from("labels").insert({ tenant_id: operator.tenant_id, name });
   if (error) throw new Error(error.message);
@@ -18,9 +29,8 @@ export async function createLabel(formData: FormData): Promise<void> {
 export async function renameLabel(formData: FormData): Promise<void> {
   const { supabase, operator } = await requireOperator();
   const id = String(formData.get("id") ?? "").trim();
-  const name = String(formData.get("name") ?? "").trim();
   if (!id) throw new Error("ラベルIDが不正です");
-  if (!name || name.length > 100) throw new Error("ラベル名を入力してください");
+  const name = parseLabelName(formData);
 
   const { error } = await supabase
     .from("labels")

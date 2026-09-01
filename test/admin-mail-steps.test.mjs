@@ -14,6 +14,7 @@ const stepEditPage = await read('src/app/admin/mail/scenarios/[scenarioId]/steps
 const stepEditActions = await read('src/app/admin/mail/scenarios/[scenarioId]/steps/[stepId]/actions.ts');
 const stepEditor = await read('src/app/admin/mail/scenarios/[scenarioId]/steps/[stepId]/step-editor.tsx');
 const mailSteps = await read('src/lib/mail-steps.ts');
+const stepOrderingMigration = await readFile(new URL('../supabase/migrations/20260901030000_step_message_ordering_rpc.sql', import.meta.url), 'utf8');
 
 test('every メール配信 page requires an authenticated operator', () => {
   for (const page of [mailPage, scenarioPage, stepsPage, stepEditPage]) {
@@ -58,10 +59,29 @@ test('step list is ordered by position and supports add, delete, and up/down reo
   assert.match(stepsActions, /export async function moveStep/);
 });
 
-test('moveStep swaps position with the adjacent step rather than reassigning the whole list', () => {
-  assert.match(stepsActions, /direction === "up" \? index - 1 : index \+ 1/);
-  assert.match(stepsActions, /update\(\{ position: target\.position \}\)/);
-  assert.match(stepsActions, /update\(\{ position: current\.position \}\)/);
+test('moveStep and createStep delegate position handling to SQL so it cannot race', () => {
+  // 並び替え・末尾追加はどちらも1トランザクションに閉じる必要がある。
+  // TS 側で position を読んでから書くと、同時操作で重複・欠番が出る。
+  assert.match(stepsActions, /rpc\("move_step_message"/);
+  assert.match(stepsActions, /rpc\("append_step_message"/);
+  // position を TS 側から直接書かないこと（renumberSteps の詰め直しは除く）。
+  const positionWrites = stepsActions.match(/update\(\{ position:/g) ?? [];
+  assert.equal(positionWrites.length, 1, `position を直接更新している箇所が多すぎる: ${positionWrites.length}`);
+  assert.match(stepsActions, /update\(\{ position: index \}\)/);
+});
+
+test('the step ordering functions run as security invoker so RLS still applies', () => {
+  assert.match(stepOrderingMigration, /create function public\.append_step_message/);
+  assert.match(stepOrderingMigration, /create function public\.move_step_message/);
+  // security definer にすると RLS を飛ばしてしまう。
+  assert.doesNotMatch(stepOrderingMigration, /security definer/);
+  // 関数定義の行だけを数える（説明コメント中の語を拾わないよう行頭に固定）。
+  const invokerCount = stepOrderingMigration.match(/^security invoker$/gm) ?? [];
+  assert.equal(invokerCount.length, 2, `security invoker の定義が2つでない: ${invokerCount.length}`);
+  // 同一シナリオへの同時操作を直列化する行ロック。
+  assert.match(stepOrderingMigration, /from public\.scenarios scenario\s+where scenario\.id = target_scenario_id for update/);
+  assert.match(stepOrderingMigration, /grant execute on function public\.append_step_message\(uuid\) to authenticated/);
+  assert.match(stepOrderingMigration, /grant execute on function public\.move_step_message\(uuid, uuid, text\) to authenticated/);
 });
 
 test('deleteStep renumbers remaining steps back to a contiguous 0-based position', () => {

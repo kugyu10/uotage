@@ -15,6 +15,22 @@ const required = (name: string) => {
 const chunks = <T>(items: T[], size: number) => Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size));
 const replace = (body: string, values: Record<string, string>) => Object.entries(values).reduce((text, [key, value]) => text.replaceAll(key, value), body);
 
+/**
+ * 長さ・内容の差でリークしないよう定数時間で比較する。
+ * 突き合わせる値をハッシュしてから比較することで、長さ違いも一定時間で扱える。
+ */
+async function secretMatches(provided: string | null, expected: string) {
+  const encoder = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(provided ?? "")),
+    crypto.subtle.digest("SHA-256", encoder.encode(expected)),
+  ]);
+  const left = new Uint8Array(a); const right = new Uint8Array(b);
+  let diff = 0;
+  for (let i = 0; i < left.length; i += 1) diff |= left[i] ^ right[i];
+  return diff === 0;
+}
+
 async function idempotencyKey(items: Delivery[]) {
   const value = items.map((item) => item.delivery_id).sort().join(",");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -22,7 +38,9 @@ async function idempotencyKey(items: Delivery[]) {
 }
 
 Deno.serve(async (request) => {
-  if (request.headers.get("authorization") !== `Bearer ${required("CRON_SECRET")}`) return new Response("Unauthorized", { status: 401 });
+  if (!(await secretMatches(request.headers.get("authorization"), `Bearer ${required("CRON_SECRET")}`))) {
+    return new Response("Unauthorized", { status: 401 });
+  }
   const targetDeliveryId = request.headers.get("x-uotage-delivery-id");
   if (targetDeliveryId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(targetDeliveryId)) {
     return new Response("Invalid delivery id", { status: 400 });

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "node --test",
+    "test": "node --test --experimental-strip-types",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",

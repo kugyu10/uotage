@@ -21,9 +21,13 @@ test('course page validates the access token and the purchase record before rend
 });
 
 test('course page embeds the content URL without ever re-emitting the access token', () => {
-  assert.match(coursePage, /<iframe src=\{product\.content_url\}/);
+  assert.match(coursePage, /<iframe\b/);
+  assert.match(coursePage, /src=\{product\.content_url\}/);
   assert.match(coursePage, /allowFullScreen/);
   assert.doesNotMatch(coursePage, /\{token\}/);
+  // このページのURLに access_token が乗るため、Referer にパスとクエリを載せない。
+  // no-referrer はドメイン制限付きの動画埋め込みを壊すので strict-origin を使う。
+  assert.match(coursePage, /referrerPolicy="strict-origin"/);
 });
 
 test('dispatcher and initial mail resolve {{member_url}} from the funnel product, falling back to the app URL', () => {

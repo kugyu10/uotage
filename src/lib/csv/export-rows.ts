@@ -42,5 +42,7 @@ export function buildScenarioExportCsv(rows: ExportReaderRow[]): string {
     return cells.map(sanitizeCsvCell);
   });
 
-  return UTF8_BOM + buildCsv(headers, csvRows);
+  // customFieldKeys はインポートCSVのヘッダー由来（外部入力）なので、
+  // ヘッダー行にも数式プレフィクス対策を掛ける。
+  return UTF8_BOM + buildCsv(headers.map(sanitizeCsvCell), csvRows);
 }

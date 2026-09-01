@@ -16,9 +16,10 @@ export async function proxy(request: NextRequest) {
   } });
   const { data } = await supabase.auth.getClaims();
   if (!data?.claims) {
-    const login = new URL("/login", request.url);
-    login.searchParams.set("next", request.nextUrl.pathname);
-    return NextResponse.redirect(login);
+    // 認証後の遷移先は /auth/callback が常に /admin へ固定する。
+    // 元のパスへ戻す機能は、オープンリダイレクトを避けるため
+    // 許可リスト方式で実装するまで持たない。
+    return NextResponse.redirect(new URL("/login", request.url));
   }
   return response;
 }

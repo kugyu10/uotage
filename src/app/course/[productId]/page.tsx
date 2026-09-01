@@ -36,7 +36,20 @@ export default async function CoursePage({ params, searchParams }: {
       <p className="eyebrow">会員サイト</p>
       <h1>{product.name}</h1>
       <div className="video-embed">
-        <iframe src={product.content_url} title={product.name} allow="autoplay; fullscreen" allowFullScreen />
+        {/*
+          このページのURLには読者の access_token が乗るため、Referer に
+          パスとクエリを載せない。既定の strict-origin-when-cross-origin でも
+          クロスオリジンへはオリジンのみだが、既定値に依存せず明示する。
+          no-referrer にはしない。Vimeo などのドメイン制限付き埋め込みは
+          Referer のオリジンで再生を許可するため、送らないと再生できなくなる。
+        */}
+        <iframe
+          src={product.content_url}
+          title={product.name}
+          allow="autoplay; fullscreen"
+          allowFullScreen
+          referrerPolicy="strict-origin"
+        />
       </div>
     </section></main>
   );
