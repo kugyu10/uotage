@@ -5,7 +5,7 @@
 // ここでは import できないもの（SQL関数、"use server" の Server Action、Route Handler）
 // について、配線が外れていないことだけをパターンで確認する。
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 import { IMPORT_BATCH_SIZE, MAX_IMPORT_ROWS } from '../src/lib/csv/import-batches.ts';
@@ -13,7 +13,7 @@ import { SUPABASE_PAGE_SIZE } from '../src/lib/supabase/paginate.ts';
 
 const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 
-const batchLimitSql = (await read('../supabase/migrations/20260819060000_import_batch_row_limit.sql'))
+const batchLimitSql = (await read('../supabase/migrations/20260902010000_import_batch_row_limit.sql'))
   .replace(/\s+/g, ' ')
   .toLowerCase();
 const importActions = await read('../src/app/admin/mail/scenarios/[scenarioId]/import/actions.ts');
@@ -52,14 +52,35 @@ test('行数ガードを足した migration も SECURITY DEFINER と service_rol
   assert.match(batchLimitSql, /on conflict \(scenario_reader_id, step_message_id\) do nothing/);
 });
 
+const previewFn = importActions.slice(
+  importActions.indexOf('export async function previewImport'),
+  importActions.indexOf('export interface ConfirmState'),
+);
+
 test('previewImport は行数上限を判定し、依然としてDBへ書き込まない', () => {
-  const previewFn = importActions.slice(
-    importActions.indexOf('export async function previewImport'),
-    importActions.indexOf('export interface ConfirmState'),
-  );
   assert.match(previewFn, /checkImportRowLimit\(parsed\.rows\.length, parsed\.invalidRows\.length\)/);
   assert.doesNotMatch(previewFn, /\.rpc\(/);
   assert.doesNotMatch(previewFn, /createAdminClient/);
+});
+
+test('previewImport は .in() を全件渡さずチャンク化し、labels もページングする', () => {
+  // 5,000件を .in() に渡すと約160〜195KBで URI長制限に当たり、上限行数に到達できない。
+  assert.match(previewFn, /fetchInChunks<string, \{ id: string; email: string \}>/);
+  assert.match(previewFn, /fetchInChunks<string, \{ reader_id: string \}>/);
+  assert.match(previewFn, /\.in\("email", chunk\)/);
+  assert.match(previewFn, /\.in\("reader_id", chunk\)/);
+  // 生の配列を .in() に渡す実装に戻っていないこと。
+  assert.doesNotMatch(previewFn, /\.in\("email", emails\)/);
+  assert.doesNotMatch(previewFn, /\.in\("reader_id", existingReaderIds\)/);
+  // labels もページングする（打ち切られると既存ラベルが「新規ラベル」に見える）。
+  assert.match(previewFn, /fetchAllPages<\{ name: string \}>/);
+});
+
+test('previewImport はクエリのエラーを握り潰さず、件数を捏造しない', () => {
+  // `data ?? []` で受けると 414 が「該当0件」と区別できず、既存読者が全員新規に見える。
+  assert.doesNotMatch(previewFn, /\?\? \[\]\)\.map/);
+  assert.match(previewFn, /status: "error"/);
+  assert.match(previewFn, /既存読者の照合に失敗しました/);
 });
 
 test('confirmImport はRPCを1回ではなくバッチごとに呼び、サマリを合算する', () => {
@@ -127,4 +148,44 @@ test('エクスポートは tenant_id スコープと CSV ヘッダーを維持�
   const froms = exportRoute.match(/\.from\("[a-z_]+"\)/g) ?? [];
   const scoped = exportRoute.match(/\.eq\("tenant_id", operator\.tenant_id\)/g) ?? [];
   assert.equal(froms.length, scoped.length, 'tenant_id スコープの無いクエリがある');
+});
+
+test('registered_at は全バッチで同じ値を渡す（バッチ間で登録日時と期限がずれない）', () => {
+  const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
+  // 'from_now' 以外でもアプリ側で1つの時刻を決めて渡す。
+  assert.match(confirmFn, /let targetRegisteredAt: string = new Date\(\)\.toISOString\(\)/);
+  assert.match(confirmFn, /target_registered_at: targetRegisteredAt,/);
+  // RPC 側は渡された時刻を優先し、未指定なら従来どおり now() に落ちる。
+  assert.match(batchLimitSql, /computed_registered_at := coalesce\(target_registered_at, execution_time\)/);
+  // 'from_now' の必須チェックは残っていること。
+  assert.match(batchLimitSql, /target_registered_at is required for delivery_mode = from_now/);
+});
+
+test('マイグレーションのバージョン（先頭14桁）が重複していない', async () => {
+  // Supabase CLI は先頭14桁をバージョンとして記録するため、重複すると
+  // db push で片方がスキップ/失敗し、適用順も保証されない。
+  const files = (await readdir(new URL('../supabase/migrations/', import.meta.url))).filter((name) =>
+    name.endsWith('.sql'),
+  );
+  const versions = files.map((name) => name.slice(0, 14));
+  const duplicated = versions.filter((version, index) => versions.indexOf(version) !== index);
+  assert.deepEqual(duplicated, [], `バージョンが重複している: ${duplicated.join(', ')}`);
+  // 14桁がすべて数字であること（命名規約から外れたファイルを検知する）。
+  for (const version of versions) {
+    assert.match(version, /^\d{14}$/);
+  }
+});
+
+test('行数ガードの migration は既存の最新より後のバージョンになっている', async () => {
+  const files = (await readdir(new URL('../supabase/migrations/', import.meta.url))).filter((name) =>
+    name.endsWith('.sql'),
+  );
+  const target = files.find((name) => name.includes('import_batch_row_limit'));
+  assert.ok(target, 'import_batch_row_limit の migration が見つからない');
+  const others = files.filter((name) => name !== target).map((name) => name.slice(0, 14));
+  const latestOther = others.sort().at(-1);
+  assert.ok(
+    target.slice(0, 14) > latestOther,
+    `${target} が既存の最新(${latestOther})より前に適用される`,
+  );
 });

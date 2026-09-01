@@ -19,6 +19,7 @@ import {
   type ImportSummary,
 } from "@/lib/csv/import-batches";
 import { jstDatetimeLocalToUtcIso } from "@/lib/csv/timezone";
+import { fetchAllPages, fetchInChunks } from "@/lib/supabase/paginate";
 
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
@@ -103,32 +104,64 @@ export async function previewImport(
     };
   }
 
-  const emails = parsed.rows.map((row) => row.email);
-  const { data: existingReaders } = await supabase
-    .from("readers")
-    .select("id, email")
-    .eq("tenant_id", operator.tenant_id)
-    .in("email", emails);
-  const existingReaderIdByEmail = new Map<string, string>((existingReaders ?? []).map((reader) => [reader.email, reader.id]));
+  // ここから3クエリ。いずれも `.in()` に最大5,000件を渡しうるので、
+  // fetchInChunks でチャンクに分けてURI長を有界にする（全件渡すと約160〜195KBになり414）。
+  //
+  // エラーは必ず throw して status:"error" に落とす。以前は `data ?? []` で受けていたため、
+  // 414 などで data が null になると「既存読者0人・全員新規」という集計になり、
+  // ドライランの唯一の目的（取り込み前に件数を確かめる）が黙って嘘をついていた。
+  let existingReaderIdByEmail: Map<string, string>;
+  let existingLabelNames: Set<string>;
+  let enrolledReaderIds: Set<string>;
 
-  const { data: existingLabels } = await supabase.from("labels").select("name").eq("tenant_id", operator.tenant_id);
-  const existingLabelNames = new Set((existingLabels ?? []).map((label) => label.name));
+  try {
+    const existingReaders = await fetchInChunks<string, { id: string; email: string }>(
+      parsed.rows.map((row) => row.email),
+      (chunk, from, to) =>
+        supabase
+          .from("readers")
+          .select("id, email")
+          .eq("tenant_id", operator.tenant_id)
+          .in("email", chunk)
+          .order("id")
+          .range(from, to),
+    );
+    existingReaderIdByEmail = new Map(existingReaders.map((reader) => [reader.email, reader.id]));
+
+    // labels はテナント単位で件数が小さいはずだが、打ち切られると既存ラベルが
+    // 「自動作成される新規ラベル」として表示されるためページングする
+    // （エクスポート側の labels 取得と同じ判断）。
+    const existingLabels = await fetchAllPages<{ name: string }>((from, to) =>
+      supabase.from("labels").select("name").eq("tenant_id", operator.tenant_id).order("name").range(from, to),
+    );
+    existingLabelNames = new Set(existingLabels.map((label) => label.name));
+
+    const enrollments = await fetchInChunks<string, { reader_id: string }>(
+      Array.from(existingReaderIdByEmail.values()),
+      (chunk, from, to) =>
+        supabase
+          .from("scenario_readers")
+          .select("reader_id")
+          .eq("tenant_id", operator.tenant_id)
+          .eq("scenario_id", scenarioId)
+          .in("reader_id", chunk)
+          .order("reader_id")
+          .range(from, to),
+    );
+    enrolledReaderIds = new Set(enrollments.map((row) => row.reader_id));
+  } catch {
+    return {
+      status: "error",
+      error: "既存読者の照合に失敗しました。件数を確認できないため中断しました。時間を置いて再度お試しください。",
+    };
+  }
+
   const newLabels = parsed.labels.filter((label) => !existingLabelNames.has(label));
 
   let alreadyEnrolled = 0;
-  const existingReaderIds = Array.from(existingReaderIdByEmail.values());
-  if (existingReaderIds.length > 0) {
-    const { data: enrollments } = await supabase
-      .from("scenario_readers")
-      .select("reader_id")
-      .eq("tenant_id", operator.tenant_id)
-      .eq("scenario_id", scenarioId)
-      .in("reader_id", existingReaderIds);
-    const enrolledReaderIds = new Set((enrollments ?? []).map((row) => row.reader_id));
-    for (const row of parsed.rows) {
-      const readerId = existingReaderIdByEmail.get(row.email);
-      if (readerId && enrolledReaderIds.has(readerId)) alreadyEnrolled += 1;
-    }
+  for (const row of parsed.rows) {
+    const readerId = existingReaderIdByEmail.get(row.email);
+    if (readerId && enrolledReaderIds.has(readerId)) alreadyEnrolled += 1;
   }
 
   return {
@@ -175,8 +208,8 @@ export const initialConfirmState: ConfirmState = { status: "idle" };
  *     UIは「先頭から◯行までは反映済み」と明示し、同じCSVでの再実行を案内する。
  *   - 再実行は安全。readers は upsert、scenario_readers / reader_labels / deliveries は
  *     すべて ON CONFLICT DO NOTHING で、既に登録済みの読者はスキップ（期限もリセットしない）。
- *     ただし delivery_mode='none'/'from_start' の registered_at は now() なので、
- *     バッチ間で数秒ずれる。ステップの送信予定が数秒ずれるだけで実害はない。
+ *   - registered_at は全バッチで同一の値を渡す。バッチごとにRPC内の now() を使うと
+ *     シナリオ登録日時と期限がバッチ間でずれるため、ここで1つ決めて共有する。
  */
 export async function confirmImport(
   scenarioId: string,
@@ -212,7 +245,10 @@ export async function confirmImport(
   const deliveryMode: DeliveryMode =
     deliveryModeRaw === "from_now" || deliveryModeRaw === "from_start" ? deliveryModeRaw : "none";
 
-  let targetRegisteredAt: string | null = null;
+  // registered_at はバッチをまたいで1つの値を使う。バッチごとにRPC内の now() を
+  // 使うと、シナリオ登録日時と期限（deadline_at）がバッチ間で数秒ずれてしまう。
+  // 'from_now' はオペレーター指定の日時、それ以外は「この確定実行の時刻」を1つ決めて渡す。
+  let targetRegisteredAt: string = new Date().toISOString();
   if (deliveryMode === "from_now") {
     const registeredAtRaw = formData.get("registeredAt");
     if (typeof registeredAtRaw !== "string" || registeredAtRaw.length === 0) {

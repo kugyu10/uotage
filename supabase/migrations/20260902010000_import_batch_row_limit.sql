@@ -6,7 +6,12 @@
 -- 再実行が安全であることは既存の ON CONFLICT DO NOTHING 群が担保している
 -- （readers は upsert、scenario_readers / reader_labels / deliveries は競合時に何もしない）。
 --
--- 関数本体は 20260819050000 と同一で、行数ガードのみを追加している。
+-- 関数本体は 20260819050000 に対して以下の2点だけを変更している。
+--   1) 1回の呼び出しの行数ガード（>1000行で raise exception）
+--   2) delivery_mode='none'/'from_start' の registered_at を
+--      coalesce(target_registered_at, now()) にする。バッチごとに now() を取ると
+--      registered_at / deadline_at がバッチ間で数秒ずれるため、呼び出し側が渡した
+--      1つの時刻を全バッチで共有できるようにする（未指定なら従来どおり now()）。
 
 create or replace function public.import_scenario_readers(
   target_tenant_id uuid,
@@ -130,8 +135,11 @@ begin
     if delivery_mode = 'from_now' then
       computed_registered_at := target_registered_at;
     else
-      -- 'none' と 'from_start' は新規読者と同じ扱い（実行時刻を登録日時とする）。
-      computed_registered_at := execution_time;
+      -- 'none' と 'from_start' は新規読者と同じ扱い（登録日時＝取り込み時刻）。
+      -- アプリ側は行を複数バッチに分けてこの関数を呼ぶため、バッチごとに now() を
+      -- 取ると registered_at と deadline_at がバッチ間で数秒ずれる。呼び出し側が
+      -- 1つの時刻を渡してきたらそれを使い、渡されなければ従来どおり実行時刻に落とす。
+      computed_registered_at := coalesce(target_registered_at, execution_time);
     end if;
 
     if selected_funnel.id is not null then

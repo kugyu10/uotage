@@ -1,7 +1,13 @@
 import "server-only";
 
 import { requireOperator } from "@/lib/supabase/server";
-import { fetchAllPages, MAX_PAGINATED_ROWS, SUPABASE_PAGE_SIZE, TOO_MANY_ROWS } from "@/lib/supabase/paginate";
+import {
+  fetchAllPages,
+  fetchInChunks,
+  MAX_PAGINATED_ROWS,
+  SUPABASE_PAGE_SIZE,
+  TOO_MANY_ROWS,
+} from "@/lib/supabase/paginate";
 import { isUuid } from "@/lib/uuid";
 import { buildScenarioExportCsv, type ExportReaderRow } from "@/lib/csv/export-rows";
 
@@ -18,9 +24,8 @@ type RouteParams = { params: Promise<{ scenarioId: string }> };
  *     クエリ文字列になり、PostgREST/プロキシのURI長制限に当たっていた。
  *     `db-max-rows` が設定された環境では `.range()` 無しの取得が黙って打ち切られるため、
  *     ページングはその取りこぼし対策も兼ねる。
- *   - readers / reader_labels / purchases も同じ `.in()` を持つが、こちらは
- *     「scenario_readers 1ページ分の reader_id」だけを渡すため、`.in()` の要素数が
- *     常に SUPABASE_PAGE_SIZE 以下に収まりURI長が有界になる。
+ *   - readers / reader_labels / purchases は reader_id を `.in()` に渡すが、
+ *     fetchInChunks で SUPABASE_IN_CHUNK_SIZE 件ずつに割るためURI長が有界になる。
  *   - scenario_readers 起点の join 1本にはしなかった。埋め込みリソース（labels や
  *     purchases のような 1:N）を join で引くと1読者が複数行に分解され、PostgREST の
  *     行数上限とページング境界がラベル単位になってページングの意味が崩れるため。
@@ -84,38 +89,42 @@ export async function GET(_request: Request, { params }: RouteParams): Promise<R
       const readerIds = Array.from(new Set(page.map((row) => row.reader_id)));
 
       const [readers, readerLabels, purchases] = await Promise.all([
-        fetchAllPages<{
-          id: string;
-          email: string;
-          name: string | null;
-          custom_fields: unknown;
-          unsubscribed_at: string | null;
-        }>((pageFrom, pageTo) =>
+        fetchInChunks<
+          string,
+          {
+            id: string;
+            email: string;
+            name: string | null;
+            custom_fields: unknown;
+            unsubscribed_at: string | null;
+          }
+        >(readerIds, (chunk, pageFrom, pageTo) =>
           supabase
             .from("readers")
             .select("id, email, name, custom_fields, unsubscribed_at")
             .eq("tenant_id", operator.tenant_id)
-            .in("id", readerIds)
+            .in("id", chunk)
             .order("id")
             .range(pageFrom, pageTo),
         ),
-        // 1読者が複数ラベルを持つため、readerIds が1ページ分でも行数はページサイズを超える。
-        fetchAllPages<{ reader_id: string; label_id: string }>((pageFrom, pageTo) =>
+        // 1読者が複数ラベルを持つため、1チャンク分でも行数はページサイズを超えうる。
+        // fetchInChunks はチャンク内をさらにページングするのでそれも吸収される。
+        fetchInChunks<string, { reader_id: string; label_id: string }>(readerIds, (chunk, pageFrom, pageTo) =>
           supabase
             .from("reader_labels")
             .select("reader_id, label_id")
             .eq("tenant_id", operator.tenant_id)
-            .in("reader_id", readerIds)
+            .in("reader_id", chunk)
             .order("reader_id")
             .order("label_id")
             .range(pageFrom, pageTo),
         ),
-        fetchAllPages<{ reader_id: string; product_id: string }>((pageFrom, pageTo) =>
+        fetchInChunks<string, { reader_id: string; product_id: string }>(readerIds, (chunk, pageFrom, pageTo) =>
           supabase
             .from("purchases")
             .select("reader_id, product_id")
             .eq("tenant_id", operator.tenant_id)
-            .in("reader_id", readerIds)
+            .in("reader_id", chunk)
             .order("reader_id")
             .order("product_id")
             .range(pageFrom, pageTo),

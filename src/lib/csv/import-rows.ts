@@ -1,3 +1,9 @@
+// このディレクトリの相対importは拡張子(.ts)を明記している。
+// リポジトリの他の場所は拡張子なしだが、ここだけは
+// `node --test --experimental-strip-types` からテストが直接importするため。
+// 型ストリッピングはバンドラのような拡張子補完を行わず、拡張子なしでは
+// ERR_MODULE_NOT_FOUND になる（tsconfig の allowImportingTsExtensions で型検査は通る）。
+// 規約をリポジトリ全体へ広げるかは未決（issue #4）。
 import { parseCsv } from "./parse.ts";
 import { KNOWN_CSV_HEADERS } from "./columns.ts";
 
