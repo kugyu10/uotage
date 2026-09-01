@@ -34,6 +34,9 @@ export const serverEnv = {
     assertServer("SUPABASE_SERVICE_ROLE_KEY");
     return required("SUPABASE_SERVICE_ROLE_KEY");
   },
+  get defaultTenantId() {
+    return required("DEFAULT_TENANT_ID");
+  },
   get resendApiKey() {
     assertServer("RESEND_API_KEY");
     return required("RESEND_API_KEY");

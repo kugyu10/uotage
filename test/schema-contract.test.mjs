@@ -66,11 +66,14 @@ test('purchase funnels require a product', () => {
   );
 });
 
-test('registration funnels forbid a product', () => {
-  assert.match(
-    sql,
-    /constraint funnels_registration_forbids_product check \( trigger_type <> 'registration' or product_id is null \)/,
-  );
+test('the registration-forbids-product constraint is lifted for target products', async () => {
+  // 初期スキーマの制約は 20260819040000 で撤廃された。
+  // 登録トリガーのファネルも「対象商品(購入済みには送らないの判定対象)」を任意で持てる。
+  const lift = (await readFile(
+    new URL('../supabase/migrations/20260819040000_target_product_skip_and_grant_label.sql', import.meta.url),
+    'utf8',
+  )).replace(/\s+/g, ' ').toLowerCase();
+  assert.match(lift, /drop constraint if exists funnels_registration_forbids_product/);
 });
 
 test('tenant-owned relationships use composite foreign keys', () => {
@@ -78,5 +81,13 @@ test('tenant-owned relationships use composite foreign keys', () => {
     /foreign key \(tenant_id, [a-z_]+\) references public\.[a-z_]+ \(tenant_id, id\)/g,
   );
   assert.ok(compositeForeignKeys, 'composite foreign keys should exist');
-  assert.equal(compositeForeignKeys.length, 16);
+  // registration_paths adds two tenant-scoped relationships to the Phase 1 schema.
+  assert.equal(compositeForeignKeys.length, 18);
+});
+
+test('registration paths are tenant-scoped, protected by RLS, and can grant a label', () => {
+  assert.match(sql, /create table public\.registration_paths \(/);
+  assert.match(sql, /alter table public\.registration_paths enable row level security;/);
+  assert.match(sql, /foreign key \(tenant_id, funnel_id\) references public\.funnels \(tenant_id, id\)/);
+  assert.match(sql, /foreign key \(tenant_id, label_id\) references public\.labels \(tenant_id, id\)/);
 });
