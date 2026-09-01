@@ -12,6 +12,7 @@
     "probe": "node scripts/probe.mjs",
     "probe:vercel": "node scripts/probe.mjs --vercel",
     "supabase:check": "node --env-file=.env.local scripts/check-supabase.mjs",
+    "verify:registration": "node --env-file=.env.local scripts/verify-registration.mjs",
     "stripe:bootstrap-test": "node --env-file=.env.local scripts/bootstrap-stripe-test-product.mjs",
     "stripe:check-purchase": "node --env-file=.env.local scripts/check-stripe-purchase.mjs",
     "vercel:sync-production-env": "node --env-file=.env.local scripts/sync-vercel-production-env.mjs",
