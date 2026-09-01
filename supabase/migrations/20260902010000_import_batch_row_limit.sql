@@ -1,23 +1,31 @@
 -- コードレビュー指摘（高）: CSVインポートが全行を1トランザクションで処理していた。
+-- 追加レビュー指摘（中）: バッチ間で時間軸がずれていた。
 --
--- アプリ側は確定実行を IMPORT_BATCH_SIZE (=500) 件ずつのRPC呼び出しに分割したが、
--- DB側にも上限を置いて契約を明示する。1バッチ = 1トランザクションなので、
--- 途中のバッチで失敗しても成功済みのバッチはコミット済みのまま残る。
--- 再実行が安全であることは既存の ON CONFLICT DO NOTHING 群が担保している
--- （readers は upsert、scenario_readers / reader_labels / deliveries は競合時に何もしない）。
+-- アプリ側は確定実行を IMPORT_BATCH_SIZE (=500) 件ずつのRPC呼び出しに分割する。
+-- 1バッチ = 1トランザクションなので、途中のバッチで失敗しても成功済みのバッチは
+-- コミット済みのまま残る。再実行が安全であることは既存の ON CONFLICT DO NOTHING 群が
+-- 担保している（readers は upsert、scenario_readers / reader_labels / deliveries は
+-- 競合時に何もしない）。
 --
 -- 関数本体は 20260819050000 に対して以下の2点だけを変更している。
 --   1) 1回の呼び出しの行数ガード（>1000行で raise exception）
---   2) delivery_mode='none'/'from_start' の registered_at を
---      coalesce(target_registered_at, now()) にする。バッチごとに now() を取ると
---      registered_at / deadline_at がバッチ間で数秒ずれるため、呼び出し側が渡した
---      1つの時刻を全バッチで共有できるようにする（未指定なら従来どおり now()）。
+--   2) 引数 target_executed_at を追加し、execution_time を
+--      coalesce(target_executed_at, now()) にする。バッチごとに now() を取ると
+--      registered_at / deadline_at だけでなく、deliveries を積むかどうかの判定
+--      （computed_scheduled_at > execution_time）までバッチごとに動いてしまう。
+--      アプリ側が決めた1つの時刻を全バッチで共有し、時間軸を1本にする。
+--      未指定なら従来どおり now() に落ちる。
+-- 引数が増えるため create or replace ではなく drop + create にしている
+-- （register_reader で既に使っている手順と同じ）。
 
-create or replace function public.import_scenario_readers(
+drop function if exists public.import_scenario_readers(uuid, uuid, text, timestamptz, jsonb);
+
+create function public.import_scenario_readers(
   target_tenant_id uuid,
   target_scenario_id uuid,
   delivery_mode text,
   target_registered_at timestamptz,
+  target_executed_at timestamptz,
   rows jsonb
 )
 returns table (
@@ -34,7 +42,12 @@ as $$
 declare
   selected_scenario public.scenarios%rowtype;
   selected_funnel public.funnels%rowtype;
-  execution_time timestamptz := now();
+  -- 「この取り込みの実行時刻」。アプリ側は行を複数バッチに分けてこの関数を呼ぶため、
+  -- バッチごとに now() を取ると時間軸がバッチごとに動く。呼び出し側が渡した1つの
+  -- 時刻を全バッチで共有し、渡されなければ従来どおり now() に落とす。
+  -- ここを共有しないと、送信予定が境界付近にあるステップが「バッチ1の読者には積まれ、
+  -- バッチ10の読者には積まれない」という差になって現れる（下の deliveries の where 参照）。
+  execution_time timestamptz := coalesce(target_executed_at, now());
   row_data jsonb;
   selected_reader public.readers%rowtype;
   enrollment public.scenario_readers%rowtype;
@@ -135,11 +148,10 @@ begin
     if delivery_mode = 'from_now' then
       computed_registered_at := target_registered_at;
     else
-      -- 'none' と 'from_start' は新規読者と同じ扱い（登録日時＝取り込み時刻）。
-      -- アプリ側は行を複数バッチに分けてこの関数を呼ぶため、バッチごとに now() を
-      -- 取ると registered_at と deadline_at がバッチ間で数秒ずれる。呼び出し側が
-      -- 1つの時刻を渡してきたらそれを使い、渡されなければ従来どおり実行時刻に落とす。
-      computed_registered_at := coalesce(target_registered_at, execution_time);
+      -- 'none' と 'from_start' は新規読者と同じ扱い（登録日時＝取り込みの実行時刻）。
+      -- execution_time はバッチ間で共有されるため、registered_at と deadline_at が
+      -- バッチごとにずれることはない。
+      computed_registered_at := execution_time;
     end if;
 
     if selected_funnel.id is not null then
@@ -199,6 +211,10 @@ begin
           steps.computed_scheduled_at,
           'queued'
         from steps
+        -- 'from_now' は「取り込み時点で送信予定が過ぎているステップは積まない」。
+        -- 基準は registered_at（過去日を指定しうる）ではなく取り込みの実行時刻。
+        -- target_registered_at を基準にすると、過去日を指定した移行で既に予定日を
+        -- 過ぎたステップまで一斉送信されるため、ここは execution_time のままにする。
         where delivery_mode = 'from_start' or steps.computed_scheduled_at > execution_time
         on conflict (scenario_reader_id, step_message_id) do nothing
         returning 1
@@ -212,5 +228,5 @@ begin
 end;
 $$;
 
-revoke all on function public.import_scenario_readers(uuid, uuid, text, timestamptz, jsonb) from public;
-grant execute on function public.import_scenario_readers(uuid, uuid, text, timestamptz, jsonb) to service_role;
+revoke all on function public.import_scenario_readers(uuid, uuid, text, timestamptz, timestamptz, jsonb) from public;
+grant execute on function public.import_scenario_readers(uuid, uuid, text, timestamptz, timestamptz, jsonb) to service_role;

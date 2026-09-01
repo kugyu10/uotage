@@ -95,6 +95,10 @@ export const SUPABASE_IN_CHUNK_SIZE = 500;
  *
  * 1チャンク分の結果自体がページサイズを超えることもある（例: reader_labels は
  * 1読者が複数行）ため、チャンク内はさらに fetchAllPages でページングする。
+ *
+ * チャンクは直列に処理する。並列化すると往復回数ぶんレイテンシが縮むが、
+ * 無制限に並列化すると Supabase のコネクションを食い潰すため、並列度は実測してから
+ * 決める（issue #6）。調整用の引数がすべて数値の位置引数である点も既知（issue #5）。
  * `fetchChunkPage` は `(chunk, from, to)` を受け、`.in(column, chunk).order(...).range(from, to)`
  * を組むこと。keys は重複除去してから使うので、呼び出し側で dedupe しなくてよい。
  */

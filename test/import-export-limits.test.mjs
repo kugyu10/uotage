@@ -39,13 +39,16 @@ test('アプリ側のバッチサイズは、RPCが受け付ける上限を超�
 test('行数ガードを足した migration も SECURITY DEFINER と service_role 限定を維持している', () => {
   assert.match(batchLimitSql, /security definer/);
   assert.match(batchLimitSql, /set search_path = ''/);
+  // 引数が1つ増えた（target_executed_at）ので、drop も revoke/grant も新旧の
+  // シグネチャが噛み合っていること。片方を直し忘れると権限が付かない関数が残る。
+  assert.match(batchLimitSql, /drop function if exists public\.import_scenario_readers\(uuid, uuid, text, timestamptz, jsonb\)/);
   assert.match(
     batchLimitSql,
-    /revoke all on function public\.import_scenario_readers\(uuid, uuid, text, timestamptz, jsonb\) from public/,
+    /revoke all on function public\.import_scenario_readers\(uuid, uuid, text, timestamptz, timestamptz, jsonb\) from public/,
   );
   assert.match(
     batchLimitSql,
-    /grant execute on function public\.import_scenario_readers\(uuid, uuid, text, timestamptz, jsonb\) to service_role/,
+    /grant execute on function public\.import_scenario_readers\(uuid, uuid, text, timestamptz, timestamptz, jsonb\) to service_role/,
   );
   // 冪等性の担保（再実行して二重登録しない）は行数ガード追加後も残っていること。
   assert.match(batchLimitSql, /on conflict \(reader_id, scenario_id\) do nothing/);
@@ -73,7 +76,7 @@ test('previewImport は .in() を全件渡さずチャンク化し、labels も�
   assert.doesNotMatch(previewFn, /\.in\("email", emails\)/);
   assert.doesNotMatch(previewFn, /\.in\("reader_id", existingReaderIds\)/);
   // labels もページングする（打ち切られると既存ラベルが「新規ラベル」に見える）。
-  assert.match(previewFn, /fetchAllPages<\{ name: string \}>/);
+  assert.match(previewFn, /fetchAllPages<\{ id: string; name: string \}>/);
 });
 
 test('previewImport はクエリのエラーを握り潰さず、件数を捏造しない', () => {
@@ -150,15 +153,39 @@ test('エクスポートは tenant_id スコープと CSV ヘッダーを維持�
   assert.equal(froms.length, scoped.length, 'tenant_id スコープの無いクエリがある');
 });
 
-test('registered_at は全バッチで同じ値を渡す（バッチ間で登録日時と期限がずれない）', () => {
+test('実行時刻は全バッチで同じ値を渡し、時間軸が1本になっている', () => {
   const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
-  // 'from_now' 以外でもアプリ側で1つの時刻を決めて渡す。
-  assert.match(confirmFn, /let targetRegisteredAt: string = new Date\(\)\.toISOString\(\)/);
-  assert.match(confirmFn, /target_registered_at: targetRegisteredAt,/);
+  // アプリ側で1つの時刻を決めて全バッチへ渡す。
+  assert.match(confirmFn, /const executedAt = new Date\(\)\.toISOString\(\)/);
+  assert.match(confirmFn, /target_executed_at: executedAt,/);
   // RPC 側は渡された時刻を優先し、未指定なら従来どおり now() に落ちる。
-  assert.match(batchLimitSql, /computed_registered_at := coalesce\(target_registered_at, execution_time\)/);
+  assert.match(batchLimitSql, /execution_time timestamptz := coalesce\(target_executed_at, now\(\)\)/);
+  // now() をバッチごとに取り直す実装に戻っていないこと。
+  assert.doesNotMatch(batchLimitSql, /execution_time timestamptz := now\(\);/);
   // 'from_now' の必須チェックは残っていること。
   assert.match(batchLimitSql, /target_registered_at is required for delivery_mode = from_now/);
+});
+
+test('deliveries の絞り込み基準は registered_at ではなく共有された実行時刻', () => {
+  // 'from_now' は過去日を指定しうる。target_registered_at を基準にすると
+  // 既に予定日を過ぎたステップまで一斉送信されるため、execution_time のままにする。
+  assert.match(batchLimitSql, /where delivery_mode = 'from_start' or steps\.computed_scheduled_at > execution_time/);
+  assert.doesNotMatch(batchLimitSql, /computed_scheduled_at > target_registered_at/);
+});
+
+test('previewImport は照合の失敗をログに残す（原因を追えるようにする）', () => {
+  // `catch {}` だとオペレーターの報告だけが残り、414・timeout・権限の区別がつかない。
+  assert.match(previewFn, /\} catch \(error\) \{/);
+  assert.match(previewFn, /console\.error\("\[csv-import\] 既存読者の照合に失敗"/);
+  assert.doesNotMatch(previewFn, /\} catch \{/);
+});
+
+test('fetchAllPages / fetchInChunks の order は一意なキーで行っている', () => {
+  // fetchAllPages の契約: 順序が安定しないページングは行の重複・欠落を生む。
+  // labels は unique (tenant_id, name) があるが、契約どおり id で order する。
+  assert.match(previewFn, /\.from\("labels"\)[\s\S]{0,160}?\.order\("id"\)/);
+  assert.match(exportRoute, /\.from\("labels"\)[\s\S]{0,160}?\.order\("id"\)/);
+  assert.doesNotMatch(previewFn, /\.from\("labels"\)[\s\S]{0,160}?\.order\("name"\)/);
 });
 
 test('マイグレーションのバージョン（先頭14桁）が重複していない', async () => {

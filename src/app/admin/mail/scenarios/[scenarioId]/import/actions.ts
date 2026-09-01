@@ -131,8 +131,9 @@ export async function previewImport(
     // labels はテナント単位で件数が小さいはずだが、打ち切られると既存ラベルが
     // 「自動作成される新規ラベル」として表示されるためページングする
     // （エクスポート側の labels 取得と同じ判断）。
-    const existingLabels = await fetchAllPages<{ name: string }>((from, to) =>
-      supabase.from("labels").select("name").eq("tenant_id", operator.tenant_id).order("name").range(from, to),
+    // order は fetchAllPages の契約どおり一意なキー（id）で行う。
+    const existingLabels = await fetchAllPages<{ id: string; name: string }>((from, to) =>
+      supabase.from("labels").select("id, name").eq("tenant_id", operator.tenant_id).order("id").range(from, to),
     );
     existingLabelNames = new Set(existingLabels.map((label) => label.name));
 
@@ -149,10 +150,19 @@ export async function previewImport(
           .range(from, to),
     );
     enrolledReaderIds = new Set(enrollments.map((row) => row.reader_id));
-  } catch {
+  } catch (error) {
+    // 失敗の理由は複数ありうる（URI長超過による414・statement timeout・権限・ネットワーク断）。
+    // オペレーターへの文言は出し分けないが、原因を追えるようにログには必ず残す。
+    // 「時間を置いて再試行」が有効でないケース（権限など）もあるため文言は中立にする。
+    console.error("[csv-import] 既存読者の照合に失敗", {
+      scenarioId,
+      tenantId: operator.tenant_id,
+      rowCount: parsed.rows.length,
+      message: error instanceof Error ? error.message : String(error),
+    });
     return {
       status: "error",
-      error: "既存読者の照合に失敗しました。件数を確認できないため中断しました。時間を置いて再度お試しください。",
+      error: "既存読者の照合に失敗しました。件数を確認できないため中断しました。管理者に連絡してください。",
     };
   }
 
@@ -208,8 +218,9 @@ export const initialConfirmState: ConfirmState = { status: "idle" };
  *     UIは「先頭から◯行までは反映済み」と明示し、同じCSVでの再実行を案内する。
  *   - 再実行は安全。readers は upsert、scenario_readers / reader_labels / deliveries は
  *     すべて ON CONFLICT DO NOTHING で、既に登録済みの読者はスキップ（期限もリセットしない）。
- *   - registered_at は全バッチで同一の値を渡す。バッチごとにRPC内の now() を使うと
- *     シナリオ登録日時と期限がバッチ間でずれるため、ここで1つ決めて共有する。
+ *   - 実行時刻（target_executed_at）は全バッチで同一の値を渡す。RPC内の now() を
+ *     バッチごとに取ると、登録日時・期限だけでなく「送信予定が過ぎたステップを積むか」の
+ *     判定までバッチごとに動くため、ここで1つ決めて時間軸を固定する。
  */
 export async function confirmImport(
   scenarioId: string,
@@ -245,10 +256,15 @@ export async function confirmImport(
   const deliveryMode: DeliveryMode =
     deliveryModeRaw === "from_now" || deliveryModeRaw === "from_start" ? deliveryModeRaw : "none";
 
-  // registered_at はバッチをまたいで1つの値を使う。バッチごとにRPC内の now() を
-  // 使うと、シナリオ登録日時と期限（deadline_at）がバッチ間で数秒ずれてしまう。
-  // 'from_now' はオペレーター指定の日時、それ以外は「この確定実行の時刻」を1つ決めて渡す。
-  let targetRegisteredAt: string = new Date().toISOString();
+  // 「この確定実行の時刻」を1つ決めて全バッチへ渡す。バッチごとにRPC内の now() を
+  // 使うと、登録日時・期限（deadline_at）だけでなく「送信予定が過ぎたステップを積むか」の
+  // 判定までバッチごとに動き、境界付近のステップが読者によって積まれたり積まれなかったり
+  // する。時間軸を1本にするための値。
+  const executedAt = new Date().toISOString();
+
+  // registered_at は 'from_now' でオペレーターが指定した日時のみ。
+  // それ以外は RPC 側が executedAt を登録日時として使う。
+  let targetRegisteredAt: string | null = null;
   if (deliveryMode === "from_now") {
     const registeredAtRaw = formData.get("registeredAt");
     if (typeof registeredAtRaw !== "string" || registeredAtRaw.length === 0) {
@@ -284,6 +300,7 @@ export async function confirmImport(
       target_scenario_id: scenarioId,
       delivery_mode: deliveryMode,
       target_registered_at: targetRegisteredAt,
+      target_executed_at: executedAt,
       rows: batch,
     });
 
