@@ -33,6 +33,9 @@ const variables = [
   ["STRIPE_SECRET_KEY", required("STRIPE_SECRET_KEY")],
   ["NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY", required("NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY")],
   ["NEXT_PUBLIC_BOOKING_URL", required("NEXT_PUBLIC_BOOKING_URL")],
+  // #9: 未設定だと /admin/* が一律503になる（src/proxy.ts）。同期忘れを防ぐため必須にする。
+  ["CF_ACCESS_TEAM_DOMAIN", required("CF_ACCESS_TEAM_DOMAIN")],
+  ["CF_ACCESS_AUD", required("CF_ACCESS_AUD")],
 ];
 
 console.log("Vercel Production へ同期する変数（値は表示しません）:");

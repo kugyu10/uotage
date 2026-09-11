@@ -10,7 +10,17 @@
 --   RLS ポリシー（auth.uid() 前提）の撤去は P5 の範囲。ここでは型不整合で
 --   マイグレーションが失敗しないよう is_tenant_operator() 側だけ最小限直す。
 --   authenticated ロールの Supabase セッションはもう発行されないため、
---   このポリシー自体は事実上使われなくなる（アプリは service role で読む）。
+--   このポリシー自体は「無害」ではなく「常に false を返す」＝当該ポリシーが
+--   保護する行は authenticated ロールから見て常に全拒否になる（実害は無い。
+--   service role が使われるため）。
+--
+-- 【重要】このマイグレーション適用直後、既存行の user_id は旧UUIDが text化
+-- されただけの無効な値のままなので、下記の手動UPDATEを実行するまで
+-- /admin 配下は全ページ 404（requireOperator 未登録扱い）になる。
+-- 適用と手動UPDATEは連続して実施すること（間はダウンタイム）。
+-- user_id は大文字小文字を正規化して小文字で入れる（アプリ側の比較も
+-- toLowerCase() している。src/lib/supabase/server.ts 参照）:
+--   update public.operators set user_id = lower('you@example.com') where id = '<uuid>';
 
 alter table public.operators
   drop constraint if exists operators_user_id_fkey;
@@ -18,11 +28,8 @@ alter table public.operators
 alter table public.operators
   alter column user_id type text using user_id::text;
 
--- 既存行は旧 Supabase Auth の UUID が text 化されただけの無効な値になる。
--- Cloudflare Access のログインを許可する実メールアドレスへ、運用者が手動で
--- 更新すること（本移行のUATで確認する）。
 comment on column public.operators.user_id is
-  'Cloudflare Access JWT の email クレーム（旧: auth.users(id) の UUID）。移行直後の値は要手動更新。';
+  'Cloudflare Access JWT の email クレーム（小文字で正規化。旧: auth.users(id) の UUID）。移行直後の値は要手動更新（上記コメント参照）。';
 
 create or replace function public.is_tenant_operator(target_tenant_id uuid)
 returns boolean
