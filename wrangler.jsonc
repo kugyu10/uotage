@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Next.js アプリ本体（Vercelから移行）用のWorker。
+  // workers/dispatch-cron/wrangler.jsonc とは別デプロイ単位（#7 参照）。
+  // 名前の衝突は無いが、切替時は「デプロイ手順書」の順序を守ること。
+  "main": ".open-next/worker.js",
+  "name": "uotage-web",
+  "compatibility_date": "2026-09-02",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      // セルフバインディング。@opennextjs/cloudflare のキャッシュ機構
+      // （fetch cache interception）が内部で使う。名前は上の "name" と一致させる。
+      // https://opennext.js.org/cloudflare/caching
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "uotage-web"
+    }
+  ]
+  // 環境変数・シークレットはここに書かない。
+  // 移行方針は docs/移行/cloudflare-workers-hosting.md を参照。
+}
