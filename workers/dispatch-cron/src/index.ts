@@ -25,6 +25,11 @@ export interface Env {
 
 const FUNCTION_PATH = "/functions/v1/dispatch-deliveries";
 const REQUEST_TIMEOUT_MS = 15_000;
+// 置き換え元の configure_delivery_cron（supabase/migrations/20260817010000_...sql）が
+// p_project_url に課していたのと同じ形式チェック。誤って http:// や末尾パス付き、
+// 別ホストを設定してしまうと CRON_SECRET を意図しない宛先へ Bearer で送ることに
+// なるため、Workers Secrets側でも同じ強さで弾く（#7 レビュー指摘 🟢-1）。
+const SUPABASE_PROJECT_URL_PATTERN = /^https:\/\/[a-z0-9]+\.supabase\.co$/;
 
 function buildFunctionUrl(projectUrl: string): string {
   const normalized = projectUrl.replace(/\/+$/, "");
@@ -34,6 +39,12 @@ function buildFunctionUrl(projectUrl: string): string {
 async function dispatchDeliveries(env: Env): Promise<void> {
   if (!env.SUPABASE_PROJECT_URL) {
     throw new Error("SUPABASE_PROJECT_URL is not configured");
+  }
+  const normalizedProjectUrl = env.SUPABASE_PROJECT_URL.replace(/\/+$/, "");
+  if (!SUPABASE_PROJECT_URL_PATTERN.test(normalizedProjectUrl)) {
+    throw new Error(
+      `SUPABASE_PROJECT_URL is not a valid https://<ref>.supabase.co URL: ${normalizedProjectUrl}`,
+    );
   }
   if (!env.CRON_SECRET) {
     throw new Error("CRON_SECRET is not configured");
@@ -56,20 +67,30 @@ async function dispatchDeliveries(env: Env): Promise<void> {
 
     const text = await response.text();
     if (!response.ok) {
-      // Edge Function側の一時的な失敗でWorkerごとリトライされると、次の1分後の
-      // 起動と重なる可能性がある。claim_deliveries の SKIP LOCKED で致命傷には
-      // ならない設計だが、ここでは例外を投げずログに残すだけに留める。
-      console.error(
-        `dispatch-deliveries failed: HTTP ${response.status} ${text.slice(0, 500)}`,
-      );
-      return;
+      const message = `dispatch-deliveries failed: HTTP ${response.status} ${text.slice(0, 500)}`;
+      console.error(message);
+      // レビュー指摘（#7 🟡-1）で握りつぶしを見直した。Cloudflareの scheduled
+      // ハンドラは失敗しても自動リトライしない（公式ドキュメントで確認済み:
+      // https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/
+      // 「失敗したinvocationはリトライされず、次のcron時刻まで待つだけ」）。
+      // つまり「リトライで次分の起動と重なる」という当初のコメントの懸念には
+      // 根拠が無かった。一方でここでreturnして握りつぶすと、Cron Triggersの
+      // Past Eventsが常に成功扱いになり、Edge Functionが401等を返し続けて
+      // 配信が全停止していても誰も気づけなくなる。throwしてinvocationを
+      // 失敗として記録させる。
+      throw new Error(message);
     }
 
     console.log(`dispatch-deliveries ok: ${text.slice(0, 500)}`);
   } catch (error) {
-    console.error(
-      `dispatch-deliveries request error: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    if (error instanceof Error && error.message.startsWith("dispatch-deliveries failed:")) {
+      // 直前でログ済み・throw済みのエラーはそのまま再送出する。
+      throw error;
+    }
+    const message = `dispatch-deliveries request error: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(message);
+    // 上と同じ理由でthrowし、Cron TriggerのPast Eventsに失敗として残す。
+    throw error instanceof Error ? error : new Error(message);
   } finally {
     clearTimeout(timeout);
   }

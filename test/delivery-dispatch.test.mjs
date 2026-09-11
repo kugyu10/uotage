@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
@@ -7,8 +8,32 @@ const purchaseSkipFix = (await readFile(new URL('../supabase/migrations/20260815
 const targetedClaim = (await readFile(new URL('../supabase/migrations/20260815050000_targeted_delivery_claim.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
 const cronConfiguration = (await readFile(new URL('../supabase/migrations/20260817010000_configure_delivery_cron.sql', import.meta.url), 'utf8')).replace(/\s+/g, ' ').toLowerCase();
 const edge = await readFile(new URL('../supabase/functions/dispatch-deliveries/index.ts', import.meta.url), 'utf8');
-const deployScript = await readFile(new URL('../scripts/deploy-delivery-worker.mjs', import.meta.url), 'utf8');
+const deployScriptPath = new URL('../scripts/deploy-delivery-worker.mjs', import.meta.url);
+const deployScript = await readFile(deployScriptPath, 'utf8');
 const registration = await readFile(new URL('../src/app/api/registrations/route.ts', import.meta.url), 'utf8');
+const workerIndex = await readFile(new URL('../workers/dispatch-cron/src/index.ts', import.meta.url), 'utf8');
+const wranglerConfig = await readFile(new URL('../workers/dispatch-cron/wrangler.jsonc', import.meta.url), 'utf8');
+
+function runDeployScriptDryRun(extraArgs, envOverrides = {}) {
+  // --dry-run は --confirm より前で process.exit(0) するため、外部への副作用
+  // （supabase CLI呼び出し・secrets書き込み）は一切発生しない（scripts/deploy-delivery-worker.mjs 参照）。
+  const env = {
+    ...process.env,
+    SUPABASE_PROJECT_REF: 'test-ref',
+    NEXT_PUBLIC_SUPABASE_URL: 'https://example.supabase.co',
+    ...envOverrides,
+  };
+  try {
+    const stdout = execFileSync(
+      process.execPath,
+      [deployScriptPath.pathname, '--app-url', 'https://example.com', '--dry-run', ...extraArgs],
+      { env, encoding: 'utf8' },
+    );
+    return { status: 0, stdout };
+  } catch (error) {
+    return { status: error.status, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
+  }
+}
 
 test('dispatcher atomically claims at most 500 and recovers stale work', () => {
   assert.match(sql, /for update skip locked limit batch_limit/);
@@ -66,4 +91,53 @@ test('delivery deployment synchronizes one secret to Vault and a one-minute cron
   assert.match(deployScript, /rest\/v1\/rpc\/configure_delivery_cron/);
   assert.match(deployScript, /p_cron_secret: cronSecret/);
   assert.doesNotMatch(cronConfiguration, /[a-za-z0-9_-]{40,}/);
+});
+
+test('deploy script defaults to skipping pg_cron reconfiguration and leaving CRON_SECRET untouched (#7 🔴-1)', () => {
+  const { status, stdout } = runDeployScriptDryRun([]);
+  assert.equal(status, 0);
+  const summary = JSON.parse(stdout);
+  assert.equal(summary.configurePgCron, false);
+  assert.equal(summary.cronSecretRotation, 'unchanged');
+});
+
+test('deploy script refuses --configure-pg-cron without a cron secret source (#7 🔴-1)', () => {
+  const { status, stderr } = runDeployScriptDryRun(['--configure-pg-cron']);
+  assert.notEqual(status, 0);
+  assert.match(stderr, /--cron-secret.*--rotate-cron-secret/);
+});
+
+test('deploy script accepts an explicit --cron-secret for pg_cron reconfiguration (#7 🔴-1)', () => {
+  const { status, stdout } = runDeployScriptDryRun(['--configure-pg-cron', '--cron-secret', 'test-secret-value']);
+  assert.equal(status, 0);
+  const summary = JSON.parse(stdout);
+  assert.equal(summary.configurePgCron, true);
+  assert.equal(summary.cronSecretRotation, 'explicit');
+});
+
+test('deploy script refuses a random --rotate-cron-secret with no way for the operator to retrieve it (#7 🔴-1)', () => {
+  const { status, stderr } = runDeployScriptDryRun(['--rotate-cron-secret']);
+  assert.notEqual(status, 0);
+  assert.match(stderr, /--cron-secret.*--secret-out/);
+});
+
+test('deploy script allows --rotate-cron-secret when --secret-out is given (#7 🔴-1)', () => {
+  const { status, stdout } = runDeployScriptDryRun(['--rotate-cron-secret', '--secret-out', '/tmp/uotage-cron-secret-test.txt']);
+  assert.equal(status, 0);
+  const summary = JSON.parse(stdout);
+  assert.equal(summary.cronSecretRotation, 'random');
+});
+
+test('Cloudflare Workers cron trigger is configured for a 1-minute schedule with no plaintext vars (#7)', () => {
+  assert.match(wranglerConfig, /"crons":\s*\["\* \* \* \* \*"\]/);
+  assert.doesNotMatch(wranglerConfig, /^\s*"vars"\s*:/m);
+});
+
+test('dispatch-cron worker reports Edge Function failures as a failed invocation instead of swallowing them (#7 🟡-1)', () => {
+  // Cloudflareのscheduledハンドラは失敗しても自動リトライしない
+  // （https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/ で確認済み）。
+  // 握りつぶすとCron TriggersのPast Eventsが常に成功扱いになり、配信停止に誰も気づけない。
+  assert.match(workerIndex, /throw new Error\(message\)/);
+  assert.match(workerIndex, /throw error instanceof Error \? error : new Error\(message\)/);
+  assert.doesNotMatch(workerIndex, /if \(!response\.ok\) \{\s*console\.error\([^)]*\);\s*return;/);
 });
