@@ -14,19 +14,43 @@
 [#7](https://github.com/kugyu10/uotage/issues/7)（PR #14、レビュー承認済み・未マージ）は
 `workers/dispatch-cron/` に **Cron 起動専用の別 Worker**（`uotage-dispatch-cron`）を
 追加する。このIssueが追加する Next.js 本体用 Worker（`uotage-web`、ルート直下の
-`wrangler.jsonc` / `open-next.config.ts`）とは、次の理由で衝突しない。
+`wrangler.jsonc` / `open-next.config.ts`）とは、デプロイ単位・実行時の挙動としては
+次の理由で独立している。
 
 - デプロイ単位が別（`wrangler.jsonc` が2つ、`name` も別: `uotage-dispatch-cron` と
   `uotage-web`）。Cloudflare 上は独立した2つの Worker になる。
-- ディレクトリも別（`workers/dispatch-cron/` 配下は独立した npm パッケージで、
-  ルートの `tsconfig.json` / `eslint.config.mjs` の対象から明示的に除外されている
-  ——このIssueのブランチには `workers/` 自体がまだ無いため、コード上の衝突は無い）。
+- 主要なロジックのディレクトリも別（`workers/dispatch-cron/` 配下は独立した
+  npm パッケージ）。
 - ルートの `package.json` にこのIssueで追加した `cf:build` / `cf:preview` /
   `cf:deploy` は Next.js 本体（`uotage-web`）専用。`workers/dispatch-cron` 側の
   `npm run deploy`（`wrangler deploy`）とは別コマンド。
 
-**マージ順序**: どちらを先にマージしても技術的な衝突は無い（触るファイルが
-重ならない）。ただし人手作業の依存関係として、
+**ただし、Git上は3ファイルでテキストコンフリクトする。** `.gitignore` /
+`eslint.config.mjs` / `tsconfig.json` の3つを両PRがそれぞれ編集しており
+（このIssueのブランチは `workers/` 追加前の `origin/main` から切っているため、
+ブランチ上では `workers/` 自体が存在しない）、`git merge-tree` で実測すると
+次の通り CONFLICT になる。
+
+```
+$ git merge-tree --write-tree --messages HEAD refs/remotes/pr14
+CONFLICT (content): Merge conflict in .gitignore
+CONFLICT (content): Merge conflict in eslint.config.mjs
+CONFLICT (content): Merge conflict in tsconfig.json
+```
+
+いずれも「配列/リストの同じ末尾に別の行を足している」形の衝突なので、
+**両方の行を残せば機械的に解決できる**（内容として意味的な衝突は無い）。
+解決後の期待形:
+
+- `tsconfig.json` の `exclude`: `["node_modules", "supabase/functions", "workers", ".open-next", ".wrangler"]`
+- `eslint.config.mjs`: `workers/**` と `.open-next/**` / `.wrangler/**` の両方を無視対象に含める
+- `.gitignore`: 両PRが追加した行（`.dev.vars` 系を含む）を両方残す
+
+後にマージする側が解決を担当することになるが、機械的な作業なので
+マージ順序を決める上での障害にはならない。
+
+**マージ順序（人手作業の依存関係）**: Git上のコンフリクトとは別に、
+運用上は次の順序を推奨する。
 
 1. 先に #7（PR #14）を運用に載せる方が自然
    （pg_cron → Workers Cron の切替は、配信基盤の可用性に直結し独立して検証しやすい）。
@@ -34,15 +58,20 @@
    （アプリ全体・認証・Server Actions・CSVアップロード）ため、#7 の切替が落ち着いた後に
    進める方が切り分けが楽。
 
-強制ではないが、**#7 → #8 の順に本番切替を進めることを推奨**する。マージ自体（GitHub上の
-統合）は順不同で問題ない。
+強制ではないが、**#7 → #8 の順に本番切替を進めることを推奨**する
+（GitHub上のマージ自体は、上記3ファイルのコンフリクト解決さえ行えばどちらが
+先でもよい）。
 
 ## やったこと
 
 - `@opennextjs/cloudflare@1.20.6` と `wrangler@^4.131.0` を devDependencies に追加
 - `next` を `16.3.0` → `16.3.4` に更新
   （`@opennextjs/cloudflare` の `peerDependencies` が `next: ">=15.5.24 <16 || >=16.3.3"` を
-  要求するため。16.3.0 は範囲外だった）
+  要求するため。16.3.0 は範囲外だった。加えて **`16.3.3` は critical の
+  RCE（リモートコード実行）脆弱性2件（GHSA-p293-qw3h-jr36 /
+  GHSA-2xp9-vwfh-vxw4）を修正したセキュリティリリース**で、`16.3.4` はその
+  follow-up。このリポジトリは PUBLIC のため、この更新はpeerDependency対応
+  抜きでも単体で妥当）
 - ルートに `open-next.config.ts` / `wrangler.jsonc` を追加
 - `package.json` に `cf:build` / `cf:preview` / `cf:deploy` を追加
   （`cf:deploy` は追加しただけで**実行していない**。実行は #13 の人手作業）
@@ -57,16 +86,35 @@
 `r2-incremental-cache` を使う。しかし R2 バケットの作成は Cloudflare
 ダッシュボード/API操作であり、このIssueでは禁止されている。
 
-そこで `src/app/**/page.tsx` を確認したところ、**全ページが
-`export const dynamic = "force-dynamic"`** で、ISR（`revalidate` によるオンデマンド
-再生成）を使っているページは無かった（`admin/**` の各 Server Action にある
-`revalidatePath` 呼び出しは、対象が全て `force-dynamic` ページなので実質的な効果はない）。
+そこで `src/app/**/page.tsx`（29ファイル）を確認したところ、24ページが
+**`export const dynamic = "force-dynamic"`**、残り5ページ（`/`, `/login`,
+`/privacy`, `/offer-ended`, `/purchase-complete`）はdynamic指定が無く
+ビルド時にプリレンダされる純静的ページだった。**「全ページが
+force-dynamic」ではない**が、いずれの分類のページも ISR（`revalidate` による
+オンデマンド再生成）は使っていない（`admin/**` の各 Server Action にある
+`revalidatePath` 呼び出しは、対象が全て `force-dynamic` ページなので
+実質的な効果はない。プリレンダされる5ページは一度生成したら再検証しない）。
 
 このため、追加リソース（R2/KV/Durable Objects）を必要としない
 `staticAssetsIncrementalCache` を選んだ（`open-next.config.ts`）。トレードオフは
 ISRのオンデマンド再検証を失うことだが、そもそも使っていないので実害はない。
 将来 ISR ページを追加する場合はこの設定を見直すこと
 （参考: https://opennext.js.org/cloudflare/caching）。
+
+**注意**: プリレンダされる5ページのうち `/login` と `/privacy` は
+`NEXT_PUBLIC_*` をビルド時の値のまま焼き込む。これが誤ったビルド手順で
+本番に事故を持ち込む原因になるため、詳細は下記「ビルド時に焼き込まれる値と、
+実行時に読まれる値の違い」で扱う。
+
+**もう一つのトレードオフ**: `staticAssetsIncrementalCache` は読み取り専用実装で、
+`set()` / `delete()` が呼ばれると `error()` ログを出す
+（`node_modules/@opennextjs/cloudflare/dist/api/overrides/incremental-cache/
+static-assets-incremental-cache.js:35-40`）。`admin/**` の Server Action にある
+`revalidatePath` 呼び出しが実行されるたびにこのログを踏む可能性がある
+（動作自体は壊れないが、Workers Logs が汚れる）。また同ファイル `:44` は
+composable cache（Next.js 16 の `use cache` ディレクティブ）を throw で拒否する。
+現状 `use cache` は未使用（grep 済み）だが、将来導入する場合はこの override を
+別実装に差し替える必要がある。
 
 ## 重要な発見: Next.js 16 の Proxy は Node.js ランタイムが既定
 
@@ -107,11 +155,19 @@ Cloudflare Workers 上での実際の動作（Cookie の読み書き・リダイ
 
 - `headers()`（`next.config.ts`）: Next.js のリクエストハンドラ自身が付与するレスポンス
   ヘッダーで、OpenNext は Next.js のサーバーコードをそのままバンドルして実行する
-  （Cloudflare固有の書き換えをしない）。したがって **Workers上でも同じロジック
-  （`next-server` 内の該当処理）がそのまま動くはず**——ただし “動くはず” であり、
-  実際に Workers 上でレスポンスヘッダーを確認したわけではない。UATで
-  `/`（など任意のページ）に対して `Referrer-Policy` `X-Frame-Options` などが
-  ついているかを確認すること。
+  （Cloudflare固有の書き換えをしない）。したがって **Next.js が処理するリクエスト
+  については同じロジック（`next-server` 内の該当処理）がそのまま動く**——ただし
+  実際に Workers 上でレスポンスヘッダーを確認したわけではないので、断定はしない。
+  **既知の差分として、`/_next/static/*` や `favicon.ico` のような静的アセットは
+  `assets.run_worker_first` を設定していない現状の `wrangler.jsonc` では
+  ASSETS バインディングが Worker を経由せず直接返すため、`headers()` の
+  `X-Content-Type-Options: nosniff` 等が効かない**
+  （`node_modules/@opennextjs/cloudflare/dist/api/overrides/asset-resolver/index.js:4-10`）。
+  Vercel では `source: "/:path*"` が静的アセットにも当たっていたため、これは
+  実挙動の差分。Content-Type 自体はアセットサーバーが正しく付けるため実害は
+  小さいと考えられるが、パリティが必要なら `assets.run_worker_first` を
+  検討すること。UATで `/`（など任意のページ）と `/_next/static/*` の両方に対して
+  `Referrer-Policy` `X-Frame-Options` などがついているかを確認すること。
 - `experimental.serverActions.bodySizeLimit: "8mb"`: これも Next.js が Server
   Action のリクエストボディをパースする際に自前で強制する上限で、Cloudflare
   固有の制約ではない。Cloudflare Workers 自体のリクエストボディサイズ上限は
@@ -135,20 +191,32 @@ Cloudflare Workers 上での実際の動作（Cookie の読み書き・リダイ
 | `cloudflare/init.js` | 2.5 KB | 1.1 KB |
 | `cloudflare/skew-protection.js` | 1.4 KB | 0.6 KB |
 | `.build/durable-objects/*.js`（3ファイル） | 22 KB | 7 KB |
-| **合計（単純合算）** | **約 8.9 MB** | **約 2.03 MiB** |
+| `server-functions/default/node_modules/`（`next` `react-dom` 等、下記コマンドの計測に含む） | 18 MB | （下表に含む） |
+| **単純合算（node_modules 抜き）** | **約 8.9 MB** | **約 2.03 MiB** |
+| **`node_modules` を含めた tar+gzip 実測（下記コマンド）** | — | **約 6.31 MiB** |
 
-10 MiB 上限に対して約 20% の使用率で、余裕がある。
+計測に使ったコマンド（この worktree でそのまま再実行できる）:
 
-**ただし、これは `wrangler deploy` が最終的に行う esbuild バンドル・
+```
+tar -c .open-next/worker.js .open-next/server-functions .open-next/middleware \
+       .open-next/cloudflare .open-next/.build | gzip -9 | wc -c
+→ 6,622,086 バイト ≒ 6.31 MiB
+```
+
+**10 MiB 上限に対して、下限 2.03 MiB・上限 6.31 MiB の間に収まる。実バンドルは
+この間のどこかになるが、確定は実デプロイ時。**「約20%で余裕がある」は
+`server-functions/default/node_modules/`（18 MB、`next` 本体を含む）を数値に
+入れていなかった過小評価で、正しくは上限で見ると約63%を使う可能性がある。
+
+**いずれにせよ、これは `wrangler deploy` が最終的に行う esbuild バンドル・
 圧縮の結果ではない**（`wrangler deploy` の実行自体がこのIssueで禁止されている
-ため、実行していない）。上表は OpenNext のビルド出力を個別に gzip した単純合算値で、
-実際の Workers アップロード用バンドルは複数ファイルを1本にまとめてから圧縮するため
-（重複コードの共有辞書効果で）**この合算値より小さくなる可能性が高い**。逆に
-`server-functions/default/node_modules/` 配下（`react` `react-dom` `next`
-`@swc` など）がまだバンドルに含まれていない依存として残っており、最終バンドルに
-含まれるかどうかは `wrangler deploy` を実行するまで確定しない。したがって
-**「10 MiB に収まる可能性が高いが、最終確認は実デプロイ時」** というのが正直な結論。
-UAT（#13）で `wrangler deploy` 実行時に出力される最終バンドルサイズを確認すること。
+ため、実行していない）。上の tar+gzip 実測値は `node_modules` を含む生ファイルを
+単純に固めた上限値で、実際の Workers アップロード用バンドルは esbuild による
+tree-shaking と重複コードの共有辞書効果で**これより小さくなる**。したがって
+**「2.03 MiB 〜 6.31 MiB の間に収まる可能性が高いが、確定は実デプロイ時」**
+というのが正直な結論。UAT（#13）で `wrangler deploy` 実行時に出力される
+最終バンドルサイズを確認すること。管理画面の機能を今後追加する際は、
+この上限63%という数値を踏まえて余裕を見ておくこと。
 
 ## 環境変数の移行方針
 
@@ -169,11 +237,9 @@ Cloudflare Workers の環境変数は2種類に分かれる。
   対話的に1件ずつ設定する（`workers/dispatch-cron/README.md` の
   `CRON_SECRET` 設定と同じ方式）。
 
-`src/lib/env.ts` の `publicEnv` / `serverEnv` が参照する環境変数は次の通り
-（`NEXT_PUBLIC_*` も含め、Cloudflare 側では区別なくすべて Secrets 経由で渡す
-方針とする——ブラウザに露出させたい `NEXT_PUBLIC_*` はビルド時に Next.js が
-埋め込むため、実際には **ビルド時**にも同じ値が必要になる点に注意。ローカルの
-`.env.local` を `cf:build` 実行前に用意しておく必要がある）。
+`src/lib/env.ts` の `publicEnv` / `serverEnv` が参照する環境変数は次の通り。
+**`NEXT_PUBLIC_*` とそれ以外で、値を渡すタイミング・手段が異なる**（詳細は
+次項「ビルド時に焼き込まれる値と、実行時に読まれる値の違い」）。
 
 ```
 NEXT_PUBLIC_APP_URL
@@ -196,6 +262,36 @@ STRIPE_WEBHOOK_SECRET
 （`RESEND_PROBE_API_KEY` はローカル `npm run probe` 専用、本番には設定しない —
 既存の `sync-vercel-production-env.mjs` のコメントと同じ方針を踏襲）
 
+### ビルド時に焼き込まれる値と、実行時に読まれる値の違い（重要）
+
+`NEXT_PUBLIC_*` は Next.js が**ビルド時に値を静的に埋め込む**。ビルド後に
+`wrangler secret put` で値を渡しても、すでに生成された静的ページ・クライアント
+バンドルの中身は変わらない。**「`NEXT_PUBLIC_*` も含め区別なくすべて Secrets
+経由で渡せばよい」という考え方は誤りで、これだけでは不十分。**
+
+このアプリは `dynamic = "force-dynamic"` が付いていない5ページ
+（`/`, `/login`, `/privacy`, `/offer-ended`, `/purchase-complete`）を持ち、
+これらはビルド時にプリレンダされる（`.open-next/server-functions/default/.next/
+prerender-manifest.json` の `routes` で実在を確認済み）。特に:
+
+- `src/app/login/page.tsx` は `publicEnv.supabaseUrl` / `publicEnv.supabaseAnonKey` /
+  `publicEnv.appUrl`（`src/lib/env.ts:21-23`）を **ビルド時の値のまま**
+  `<LoginForm>` の props に固定する。未設定でビルドすると空文字列が、
+  dev の `.env.local` が残っていればdevの値がそのまま本番ページに焼き込まれる。
+- `src/app/privacy/page.tsx` も `NEXT_PUBLIC_OPERATOR_NAME` 等を同様に焼き込む
+  （未設定なら「運営者情報を設定してください」がそのまま公開される）。
+
+一方 `src/proxy.ts:6-7` の `process.env.NEXT_PUBLIC_SUPABASE_URL` /
+`NEXT_PUBLIC_SUPABASE_ANON_KEY` は Proxy がプリレンダの対象ではないため
+**リクエストごとに実行時に読まれる**。この2つだけは `wrangler secret put`
+でも渡す必要がある。
+
+| 変数 | ビルド時（`.env.local` 等を用意してから `cf:build`） | 実行時（`wrangler secret put`） |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 必要（プリレンダ用） | 必要（`src/proxy.ts` 用） |
+| 他の `NEXT_PUBLIC_*` | 必要 | 不要（渡しても使われない） |
+| `NEXT_PUBLIC_*` 以外（`SUPABASE_SERVICE_ROLE_KEY` 等） | 不要 | 必要 |
+
 ### `scripts/sync-vercel-production-env.mjs` の後継
 
 このスクリプトは削除せず残す（Vercelでの並行稼働中は引き続き必要）。
@@ -217,17 +313,30 @@ STRIPE_WEBHOOK_SECRET
 ### 1. 並行稼働（Cloudflare Workers を「隠しURL」で立てる）
 
 1. Cloudflare Workers Paid（$5/月）を契約する
-2. `npm ci && npm run cf:build`
-3. `.dev.vars` または `wrangler secret put` で Secrets を設定する
-   （上記「環境変数の移行方針」参照）
-4. `npx wrangler deploy`
+2. **本番用の `NEXT_PUBLIC_*` を `.env.local`（または `cf:build` 実行時の環境変数）に
+   用意する。** 対象は `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_SUPABASE_URL` /
+   `NEXT_PUBLIC_SUPABASE_ANON_KEY` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` /
+   `NEXT_PUBLIC_OPERATOR_NAME` / `NEXT_PUBLIC_CONTACT_EMAIL` /
+   `NEXT_PUBLIC_OPERATOR_ADDRESS` / `NEXT_PUBLIC_BOOKING_URL` の8つ全て。
+   **dev用の値が入った `.env.local` が残っていないことを確認してから次へ進む**
+   （上記「ビルド時に焼き込まれる値と、実行時に読まれる値の違い」参照。
+   これを飛ばすと `/login` が空の値または dev の Supabase プロジェクトに
+   向かって認証を試みる状態で公開される）。
+3. `npm ci && npm run cf:build`
+4. `wrangler secret put` で Secrets を設定する
+   （上記「環境変数の移行方針」参照。対象は `NEXT_PUBLIC_*` **以外**の全変数と、
+   実行時にも読まれる `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   の2つ。他の `NEXT_PUBLIC_*` を渡しても手順2で焼き込み済みのため意味が無い）
+5. `npx wrangler deploy`
    → `<worker名>.<アカウント名>.workers.dev` のURLが払い出される
    （本番ドメインにはまだ紐付けない）
-5. `workers.dev` のURLに対して手動で一通り動作確認する
+6. `workers.dev` のURLに対して手動で一通り動作確認する
    （ログイン、`/admin` 配下、CSVインポートのドライラン→確定実行、
    Stripe決済のテストモード、メール配信のトリガ）。
    **このステップで「Node.js middleware警告」「headers()」
-   「bodySizeLimit 8MB」の3点を重点的に見る**（上記「未検証」項目）。
+   「bodySizeLimit 8MB」に加えて、`/login` の HTML に本番の Supabase URL
+   （dev やプレースホルダではないこと）が入っていることを重点的に見る**
+   （上記「未検証」項目、および手順2の焼き込み確認）。
 
 ### 2. DNSを切り替える
 
@@ -277,10 +386,17 @@ DNSを戻す。
 ## 未検証（Cloudflareアカウントの状態・実デプロイに依存するため、UAT #13へ）
 
 - `wrangler deploy` による実デプロイと、その際の最終バンドルサイズ
+  （下限2.03 MiB・上限6.31 MiBの間のどこに収まるか）
 - Cloudflare Workers 上での `/admin` 認証フロー（Node.js middleware 経由の
   Cookie読み書き・リダイレクト）
 - `headers()` が実際に Workers上のレスポンスに付与されること
+  （`/_next/static/*` などの静的アセット経路には効かない既知の差分がある。
+  上記「`headers()` / `bodySizeLimit` の扱い」参照）
 - Server Action の `bodySizeLimit: "8mb"` が Workers上でも8MBまで通ること
   （CSVインポートのドライラン→確定実行）
+- **本番切替直後、`/login` の HTML に本番の Supabase URL / anon key が
+  入っていること**（dev の値やプレースホルダのままになっていないか）。
+  手順書側でビルド前に本番値を用意するよう明記したが、実際にビルド・
+  デプロイした結果としての最終確認はここで行う。
 - Stripe Webhook・Resendメール送信・Supabase接続の実疎通
 - DNS切替・Vercel停止・ロールバック手順そのものの実行
