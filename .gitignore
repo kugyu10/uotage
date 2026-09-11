@@ -46,3 +46,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# cloudflare workers (workers/dispatch-cron)
+**/node_modules
+.wrangler/
+.dev.vars
+.dev.vars.*

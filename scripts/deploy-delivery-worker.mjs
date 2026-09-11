@@ -42,12 +42,26 @@ if (sendNow && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
   process.exit(64);
 }
 
+// 移行 #7 以降、cron起動元は Cloudflare Workers（workers/dispatch-cron）が既定。
+// pg_cron 側の (再)構成は明示的な --configure-pg-cron を指定したときだけ行う。
+// うっかり付けたまま再デプロイすると pg_cron が復活し、Workers と二重起動する
+// おそれがあるため、既定は「Edge Functionのデプロイとsecrets設定のみ」。
+const configurePgCron = process.argv.includes("--configure-pg-cron");
+if (configurePgCron) {
+  console.warn(
+    "[DEPRECATED] --configure-pg-cron は pg_cron 経路の再構成であり、Cloudflare Workers Cron Trigger" +
+    "（workers/dispatch-cron）と同時に有効化すると二重起動になります。" +
+    "Workers移行後は原則使わないでください（ロールバック時のみ想定）。",
+  );
+}
+
 console.log(JSON.stringify({
   action: "deploy-delivery-worker",
   projectRef,
   function: "dispatch-deliveries",
   appUrl: appUrl.replace(/\/$/, ""),
-  configureCron: "dispatch-deliveries-every-minute (* * * * *)",
+  configurePgCron,
+  configureCron: configurePgCron ? "dispatch-deliveries-every-minute (* * * * *)" : "スキップ（Cloudflare Workers Cron Triggerを使用）",
   invokeAfterDeploy: sendNow || probe,
   targetedDeliveryId: deliveryId ?? null,
   secretHandling: "一時ファイルにのみ作成し、終了時に削除。値は表示しません。",
@@ -73,22 +87,30 @@ try {
   await run("supabase", ["functions", "deploy", "dispatch-deliveries", "--no-verify-jwt", "--project-ref", projectRef]);
   await run("supabase", ["secrets", "set", "--project-ref", projectRef, "--env-file", secretFile]);
 
-  const serviceRoleKey = required("SUPABASE_SERVICE_ROLE_KEY");
-  const cronResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/configure_delivery_cron`, {
-    method: "POST",
-    headers: {
-      apikey: serviceRoleKey,
-      authorization: `Bearer ${serviceRoleKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ p_project_url: supabaseUrl, p_cron_secret: cronSecret }),
-  });
-  if (!cronResponse.ok) {
-    throw new Error(`配信cronの構成に失敗しました (HTTP ${cronResponse.status})。migrationが反映済みか確認してください。`);
+  if (configurePgCron) {
+    const serviceRoleKey = required("SUPABASE_SERVICE_ROLE_KEY");
+    const cronResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/configure_delivery_cron`, {
+      method: "POST",
+      headers: {
+        apikey: serviceRoleKey,
+        authorization: `Bearer ${serviceRoleKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ p_project_url: supabaseUrl, p_cron_secret: cronSecret }),
+    });
+    if (!cronResponse.ok) {
+      throw new Error(`配信cronの構成に失敗しました (HTTP ${cronResponse.status})。migrationが反映済みか確認してください。`);
+    }
+    const cronJobId = await cronResponse.json();
+    if (!Number.isInteger(cronJobId)) throw new Error("配信cronの構成結果が不正です");
+    console.log(`配信cronを1分間隔で構成しました: job ${cronJobId}`);
+  } else {
+    console.log(
+      "pg_cronの構成はスキップしました。CRON_SECRETをローテーションしたため、" +
+      "Cloudflare Workers側のシークレット（workers/dispatch-cron, wrangler secret put CRON_SECRET）も" +
+      "同じ値に更新してください。値はこのログには出力されません。",
+    );
   }
-  const cronJobId = await cronResponse.json();
-  if (!Number.isInteger(cronJobId)) throw new Error("配信cronの構成結果が不正です");
-  console.log(`配信cronを1分間隔で構成しました: job ${cronJobId}`);
 
   if (!sendNow && !probe) {
     console.log("配信ワーカーをデプロイして環境変数を設定しました。直接起動は行っていません。");
