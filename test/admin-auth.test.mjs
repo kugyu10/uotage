@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
 const proxy = await readFile(new URL('../src/proxy.ts', import.meta.url), 'utf8');
+const cloudflareAccess = await readFile(new URL('../src/lib/cloudflare-access.ts', import.meta.url), 'utf8');
 const admin = await readFile(new URL('../src/app/admin/page.tsx', import.meta.url), 'utf8');
 const layout = await readFile(new URL('../src/app/admin/layout.tsx', import.meta.url), 'utf8');
 const server = await readFile(new URL('../src/lib/supabase/server.ts', import.meta.url), 'utf8');
@@ -20,12 +21,19 @@ const sections = await Promise.all(
   sectionPages.map((path) => readFile(new URL(`../src/app/admin/${path}`, import.meta.url), 'utf8')),
 );
 
-test('admin routes require a verified session and operator membership', () => {
-  assert.match(proxy, /getClaims\(\)/);
+test('admin routes require a verified Cloudflare Access JWT and operator membership', () => {
+  // #9: Supabase Auth（getClaims）から Cloudflare Access の JWT 検証へ移行。
+  // 実際の署名検証・issuer/audience チェックは
+  // test/unit/cloudflare-access.test.ts で実行して確認している。
+  assert.match(proxy, /verifyAccessJwt\(/);
+  assert.doesNotMatch(proxy, /getClaims\(\)/);
   assert.match(proxy, /matcher: \["\/admin\/:path\*"\]/);
-  assert.match(server, /auth\.getUser\(\)/);
+  assert.match(cloudflareAccess, /jwtVerify\(/);
+  assert.match(cloudflareAccess, /createRemoteJWKSet\(/);
   assert.match(server, /from\("operators"\)/);
-  assert.match(server, /if \(!operator\) redirect/);
+  assert.match(server, /if \(!operator\) \{/);
+  assert.match(server, /notFound\(\)/);
+  assert.doesNotMatch(server, /auth\.getUser\(\)/);
   assert.match(admin, /requireOperator\(\)/);
   assert.match(layout, /requireOperator\(\)/);
   for (const section of sections) assert.match(section, /requireOperator\(\)/);
