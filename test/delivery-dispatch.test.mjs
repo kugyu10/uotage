@@ -134,9 +134,10 @@ test('Cloudflare Workers cron trigger is configured for a 1-minute schedule with
 });
 
 test('dispatch-cron worker reports Edge Function failures as a failed invocation instead of swallowing them (#7 🟡-1)', () => {
-  // Cloudflareのscheduledハンドラは失敗しても自動リトライしない
+  // throwすればCron TriggerのPast Eventsに失敗として記録される
   // （https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/ で確認済み）。
-  // 握りつぶすとCron TriggersのPast Eventsが常に成功扱いになり、配信停止に誰も気づけない。
+  // 握りつぶすとPast Eventsが常に成功扱いになり、配信停止に誰も気づけない。
+  // なお「自動リトライが無い」点は同ページに明記が無く未確認（#7 🟢-3、index.tsのコメント参照）。
   assert.match(workerIndex, /throw new Error\(message\)/);
   assert.match(workerIndex, /throw error instanceof Error \? error : new Error\(message\)/);
   assert.doesNotMatch(workerIndex, /if \(!response\.ok\) \{\s*console\.error\([^)]*\);\s*return;/);

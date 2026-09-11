@@ -65,10 +65,16 @@ if (configurePgCron) {
 // 状態になっていた。
 //
 // 対策: 既定では CRON_SECRET を一切ローテーションしない
-// （env-fileに含めない。`supabase secrets set --env-file` は
-//  env-fileに書いたキーだけを更新するため、含めなければ既存値は
-//  Supabase側にそのまま残る。CLIの挙動は公式ドキュメントの
-//  差分同期パターンで確認した: env-fileに無いキーは変更されない）。
+// （env-fileに含めない。`supabase secrets set --env-file` はenv-fileに
+//  書いたキーだけを更新し、含めないキーの既存値は変わらない……という
+//  挙動を前提にしている。ただしこれは「set」と「unset」が別コマンドとして
+//  存在すること、および `supabase secrets list` で個別キーの確認ができる
+//  ことからの推定であり、公式ドキュメント（CLIリファレンス /
+//  Edge Functions Secretsガイド）には env-fileに無いキーがどうなるかの
+//  明記が無い＝未確認（#7 🟡-2）。もしこの推定が外れて全置換の実装
+//  だった場合、CRON_SECRETがSupabase側から消えて配信が401で全停止する。
+//  初回実行後は必ず `supabase secrets list --project-ref <ref>` で
+//  CRON_SECRETの残存を確認すること（UAT集約Issue #13参照）。
 // ローテーションしたい場合は明示的に --rotate-cron-secret または
 // --cron-secret <value> を指定する。その場合、運用者が値を確実に
 // 受け取れるよう --cron-secret（運用者が値を選ぶ）または --secret-out
@@ -93,6 +99,17 @@ if (rotateCronSecretFlag && explicitCronSecret === undefined && !secretOutPath) 
   console.error(
     "--rotate-cron-secret でランダム生成した値を運用者が取得する手段がありません。" +
     "--cron-secret <value> で値を指定するか、--secret-out <path> で書き出し先を指定してください。",
+  );
+  process.exit(64);
+}
+// レビュー指摘（#7 🟢-2）: --send-now/--probe で直接起動するにはCRON_SECRETの値が
+// 必要（cronSecretはrotateCronSecretがtrueのときだけ定義される）。他の2つの
+// ガードと同じく --confirm より前、functions deploy / secrets set を実行する前に
+// 弾く（「デプロイだけ済んで途中で落ちる」不整合な終わり方を避ける）。
+if ((sendNow || probe) && !rotateCronSecret) {
+  console.error(
+    "--send-now/--probe で直接起動するには、CRON_SECRETの値が必要です。" +
+    "--cron-secret <value> か --rotate-cron-secret を指定してください。",
   );
   process.exit(64);
 }
@@ -127,9 +144,11 @@ try {
     "",
   ].join("\n"), { mode: 0o600 });
 
-  await run("supabase", ["functions", "deploy", "dispatch-deliveries", "--no-verify-jwt", "--project-ref", projectRef]);
-  await run("supabase", ["secrets", "set", "--project-ref", projectRef, "--env-file", secretFile]);
-
+  // レビュー指摘（#7 🟢-1）: --secret-out への書き出しは、Supabase側の
+  // secrets set（＝ローテーションの実行）より前に行う。書き出し先ディレクトリが
+  // 存在しない・書き込み権限が無いといった失敗を、リモート側を変更する前に
+  // 検出するため（後回しだとEdge Function側だけ新しい値になり、その値が
+  // どこにも残らず失われる）。
   if (cronSecret !== undefined && secretOutPath) {
     await writeFile(secretOutPath, `${cronSecret}\n`, { mode: 0o600 });
     console.log(
@@ -138,6 +157,9 @@ try {
       "このファイルは運用者自身で削除してください。",
     );
   }
+
+  await run("supabase", ["functions", "deploy", "dispatch-deliveries", "--no-verify-jwt", "--project-ref", projectRef]);
+  await run("supabase", ["secrets", "set", "--project-ref", projectRef, "--env-file", secretFile]);
 
   if (configurePgCron) {
     const serviceRoleKey = required("SUPABASE_SERVICE_ROLE_KEY");

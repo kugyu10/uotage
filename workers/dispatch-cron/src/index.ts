@@ -69,15 +69,24 @@ async function dispatchDeliveries(env: Env): Promise<void> {
     if (!response.ok) {
       const message = `dispatch-deliveries failed: HTTP ${response.status} ${text.slice(0, 500)}`;
       console.error(message);
-      // レビュー指摘（#7 🟡-1）で握りつぶしを見直した。Cloudflareの scheduled
-      // ハンドラは失敗しても自動リトライしない（公式ドキュメントで確認済み:
+      // レビュー指摘（#7 🟡-1 / 🟢-3）で握りつぶしを見直した。
+      // 公式ドキュメント（確認済み）:
       // https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/
-      // 「失敗したinvocationはリトライされず、次のcron時刻まで待つだけ」）。
-      // つまり「リトライで次分の起動と重なる」という当初のコメントの懸念には
-      // 根拠が無かった。一方でここでreturnして握りつぶすと、Cron Triggersの
-      // Past Eventsが常に成功扱いになり、Edge Functionが401等を返し続けて
-      // 配信が全停止していても誰も気づけなくなる。throwしてinvocationを
-      // 失敗として記録させる。
+      // 「The first ctx.waitUntil to fail will be observed and recorded as
+      // the status in the Cron Trigger Past Events table」。throwすれば
+      // このinvocationはPast Eventsに失敗として記録される。
+      // なお「Cron Triggerには自動リトライが無く、失敗しても次のcron時刻まで
+      // 待つだけ」という点は、上記ページ自体には明記が無い（リトライ挙動に
+      // 一切言及していない）。この点はCloudflareコミュニティの複数報告
+      // （リトライされないことが前提の議論のみで、リトライされたという
+      // 報告が見当たらない）からの推定であり、公式ドキュメントでの断定
+      // ではない＝未確認。
+      // いずれにせよ、ここでreturnして握りつぶすと、Cron TriggersのPast
+      // Eventsが常に成功扱いになり、Edge Functionが401等を返し続けて配信が
+      // 全停止していても誰も気づけなくなる。throwしてinvocationを失敗として
+      // 記録させる（万一リトライされたとしても、二重送信は
+      // `UNIQUE(scenario_reader_id, step_message_id)` と `status=processing`
+      // の冪等性ガードで防がれる）。
       throw new Error(message);
     }
 
