@@ -45,3 +45,14 @@ as $$
       and user_id = auth.uid()::text
   );
 $$;
+
+-- #9 レビュー#2 🟡-3: requireOperator() は Cloudflare Access 移行に伴い
+-- service_role クライアントを返すようになった（authenticated ロールのセッションは
+-- もう発行されない）。append_step_message / move_step_message は
+-- 20260901030000_step_message_ordering_rpc.sql で authenticated にのみ EXECUTE を
+-- 付与しており、service_role からは alter default privileges 次第で権限拒否になり得る。
+-- 他の全RPC（register_reader / import_scenario_readers / claim_deliveries /
+-- process_stripe_purchase / configure_delivery_cron 等）と同じく、呼ぶロールへ
+-- 明示的に付与する（冪等・無害）。
+grant execute on function public.append_step_message(uuid) to service_role;
+grant execute on function public.move_step_message(uuid, uuid, text) to service_role;
