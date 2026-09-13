@@ -1,7 +1,7 @@
 import { requireOperator } from "@/lib/supabase/server";
 
-import { createProduct } from "../actions";
-import { ProductForm } from "../ProductForm";
+import { createProduct } from "../actions.ts";
+import { ProductForm } from "../ProductForm.tsx";
 
 export const dynamic = "force-dynamic";
 

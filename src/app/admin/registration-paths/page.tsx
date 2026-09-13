@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { requireOperator } from "@/lib/supabase/server";
 
-import { createRegistrationPath, deleteRegistrationPath } from "./actions";
+import { createRegistrationPath, deleteRegistrationPath } from "./actions.ts";
 
 export const dynamic = "force-dynamic";
 
