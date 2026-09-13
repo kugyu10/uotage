@@ -16,9 +16,15 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
   const boundPreviewImport = previewImport.bind(null, scenarioId);
   const [previewState, previewAction, previewPending] = useActionState(boundPreviewImport, initialPreviewState);
 
+  // React 19 は action 付き <form> の送信後に form.reset() を走らせるため、ドライラン成功後の
+  // file input は空になる。確定実行にファイルを再送する（issue #2）には DOM の input に頼れないので、
+  // onChange で受け取った File をここに保持し、確定実行の FormData へ詰め直す。
+  // input の value はプログラムから復元できないが、File ハンドル自体は state で生き残る。
+  const [file, setFile] = useState<File | null>(null);
+
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>("none");
-  // 確定実行にはファイルそのものを再送してサーバーで再パースする（issue #2）。
-  // クライアントへ戻すのはドライランしたファイルのハッシュだけで、検証済み行は往復しない。
+  // 確定実行はファイルそのものをサーバーで再パースする（issue #2）。クライアントへ戻すのは
+  // ドライランしたファイルのハッシュだけで、検証済み行は往復しない。
   const boundConfirmImport = confirmImport.bind(null, scenarioId, previewState.fileHash);
   const [confirmState, confirmAction, confirmPending] = useActionState(boundConfirmImport, initialConfirmState);
 
@@ -57,50 +63,63 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
 
   return (
     <div>
-      {/* file input は1つの form に置き、ドライランと確定実行は submit ボタンの formAction で
-          出し分ける。確定実行のリクエストにも同じファイルが含まれるため、サーバー側で
-          再パースでき、検証済み行を RSC ペイロードで往復させずに済む（issue #2）。 */}
       <form action={previewAction}>
         <p>
           <label>
             CSVファイル（UTAGE互換、日本語ヘッダー / 5MB・{MAX_IMPORT_ROWS.toLocaleString("ja-JP")}行まで）
             <br />
-            <input type="file" name="file" accept=".csv,text/csv" required />
+            <input
+              type="file"
+              name="file"
+              accept=".csv,text/csv"
+              required
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            />
           </label>
         </p>
         <button type="submit" disabled={previewPending || confirmPending}>
           {previewPending ? "確認中…" : "ドライラン実行"}
         </button>
+      </form>
 
-        {previewState.status === "error" && <p role="alert">{previewState.error}</p>}
+      {previewState.status === "error" && <p role="alert">{previewState.error}</p>}
 
-        {previewState.status === "ready" && (
-          <div>
-            <h2>ドライラン結果: {previewState.fileName}</h2>
-            <ul>
-              <li>取り込み対象行数: {previewState.totalRows}件</li>
-              <li>新規読者: {previewState.newReaders}件</li>
-              <li>既存読者（更新）: {previewState.existingReaders}件</li>
-              <li>このシナリオへ既に登録済み（スキップ対象）: {previewState.alreadyEnrolled}件</li>
-              <li>自動作成されるラベル: {previewState.newLabels && previewState.newLabels.length > 0 ? previewState.newLabels.join(", ") : "なし"}</li>
-            </ul>
+      {previewState.status === "ready" && (
+        <div>
+          <h2>ドライラン結果: {previewState.fileName}</h2>
+          <ul>
+            <li>取り込み対象行数: {previewState.totalRows}件</li>
+            <li>新規読者: {previewState.newReaders}件</li>
+            <li>既存読者（更新）: {previewState.existingReaders}件</li>
+            <li>このシナリオへ既に登録済み（スキップ対象）: {previewState.alreadyEnrolled}件</li>
+            <li>自動作成されるラベル: {previewState.newLabels && previewState.newLabels.length > 0 ? previewState.newLabels.join(", ") : "なし"}</li>
+          </ul>
 
-            {previewState.invalidRows && previewState.invalidRows.length > 0 && (
-              <div>
-                <h3>不正行（{previewState.invalidRowsTotal ?? previewState.invalidRows.length}件、取り込み対象外）</h3>
-                <ul>
-                  {previewState.invalidRows.map((row) => (
-                    <li key={row.line}>
-                      {row.line}行目: {row.reason}
-                    </li>
-                  ))}
-                </ul>
-                {(previewState.invalidRowsTotal ?? 0) > previewState.invalidRows.length && (
-                  <p>先頭{previewState.invalidRows.length}件のみ表示しています。</p>
-                )}
-              </div>
-            )}
+          {previewState.invalidRows && previewState.invalidRows.length > 0 && (
+            <div>
+              <h3>不正行（{previewState.invalidRowsTotal ?? previewState.invalidRows.length}件、取り込み対象外）</h3>
+              <ul>
+                {previewState.invalidRows.map((row) => (
+                  <li key={row.line}>
+                    {row.line}行目: {row.reason}
+                  </li>
+                ))}
+              </ul>
+              {(previewState.invalidRowsTotal ?? 0) > previewState.invalidRows.length && (
+                <p>先頭{previewState.invalidRows.length}件のみ表示しています。</p>
+              )}
+            </div>
+          )}
 
+          {/* 確定実行は独立した form にする（required の制約がドライラン側と混ざらない）。
+              file input はこの form に無いため、state に保持した File を FormData へ詰め直して
+              サーバーで再パースさせる。ドライラン時と違うファイルならサーバーのハッシュ照合が弾く。 */}
+          <form
+            action={(formData) => {
+              if (file) formData.set("file", file);
+              confirmAction(formData);
+            }}
+          >
             <fieldset>
               <legend>再送防止オプション</legend>
               <p>
@@ -153,12 +172,12 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
 
             {confirmState.status === "error" && <p role="alert">{confirmState.error}</p>}
 
-            <button type="submit" formAction={confirmAction} disabled={confirmPending || previewPending}>
+            <button type="submit" disabled={confirmPending || previewPending}>
               {confirmPending ? "実行中…" : "この内容で確定して実行"}
             </button>
-          </div>
-        )}
-      </form>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

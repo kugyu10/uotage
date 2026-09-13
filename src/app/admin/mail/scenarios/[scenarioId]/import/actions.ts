@@ -279,10 +279,16 @@ export async function confirmImport(
   }
 
   // ハッシュが一致した時点でドライランと同一テキストなのでパースは成功するはずだが、防御的に扱う。
+  // ほぼ到達不能な分岐だからこそ、万一来たときに原因を追えるようログを残す（preview 側と同じ流儀）。
   let parsed;
   try {
     parsed = parseImportCsv(text);
-  } catch {
+  } catch (error) {
+    console.error("[csv-import] 確定実行の再パースに失敗", {
+      scenarioId,
+      tenantId: operator.tenant_id,
+      message: error instanceof Error ? error.message : String(error),
+    });
     return { status: "error", error: "CSVの読み込みに失敗しました。もう一度ドライランからやり直してください。" };
   }
 

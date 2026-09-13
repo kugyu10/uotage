@@ -126,8 +126,12 @@ test('確定実行はドライラン済みファイルとの同一性をハッ�
   assert.match(confirmFn, /hashImportCsvText\(text\) !== expectedFileHash/);
   // ウィザードが bind で戻すのはハッシュだけ（bind 引数は暗号化されるため改竄できない）。
   assert.match(importWizard, /confirmImport\.bind\(null, scenarioId, previewState\.fileHash\)/);
-  // ドライランと確定実行が同じ form の file input を共有していること（ボタンの formAction で出し分け）。
-  assert.match(importWizard, /formAction=\{confirmAction\}/);
+  // React 19 は action 付き form の送信後に form.reset() を走らせ file input が空になるため、
+  // 確定実行は state に保持した File を FormData へ詰め直して送る（レビュー指摘の対応）。
+  // 注意: ここは構造（配線）の検証のみ。実際にファイルがリクエストへ乗るかはブラウザ挙動に
+  // 依存するため、実ブラウザでの確認は UAT (#13) に積んである。
+  assert.match(importWizard, /formData\.set\("file", file\)/);
+  assert.match(importWizard, /confirmAction\(formData\)/);
   const fileInputs = importWizard.match(/type="file"/g) ?? [];
   assert.equal(fileInputs.length, 1, 'file input が複数あると再送されるファイルが曖昧になる');
 });
