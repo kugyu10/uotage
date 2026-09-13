@@ -341,3 +341,28 @@ test("fetchInChunks はチャンクが失敗したら以降のチャンクに新
   await assert.rejects(promise, /boom/);
   assert.deepEqual(started, ["a", "b"], "b の失敗後に c/d へ着手してしまっている");
 });
+
+test("fetchInChunks は不正な concurrency でも静かに空を返さず、既定の並列度で全チャンクを取り切る", async () => {
+  // ガードが壊れて workerCount が 0 になると、Promise.all([]) が即解決して
+  // エラーなしで [] が返る（「該当0件」と区別できない静かな嘘）。
+  // chunkSize 側の「不正な chunkSize でも既定値で割る」テストと対にする。
+  for (const bad of [0, -1, Number.NaN]) {
+    const keys = Array.from({ length: 9 }, (_unused, index) => `k${index}`);
+    let inFlight = 0;
+    let maxInFlight = 0;
+
+    const fetchChunkPage = async (chunk: string[]) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await microtaskDelay();
+      await microtaskDelay();
+      inFlight -= 1;
+      return { data: [chunk[0]], error: null };
+    };
+
+    const rows = await fetchInChunks<string, string>(keys, fetchChunkPage, 1, 10, 1000, bad);
+
+    assert.deepEqual(rows, keys, `concurrency=${bad} で結果が欠けるか順序が崩れた`);
+    assert.equal(maxInFlight, SUPABASE_CHUNK_CONCURRENCY, `concurrency=${bad} が既定の並列度に落ちていない`);
+  }
+});

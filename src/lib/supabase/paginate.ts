@@ -115,6 +115,10 @@ export const SUPABASE_CHUNK_CONCURRENCY = 3;
  * （部分的な結果でCSVや集計を作らないという既存方針は維持しつつ、失敗が分かった
  * 時点で呼び出し元を待たせない）。ただし着手済みのチャンク自体は中断できないため、
  * バックグラウンドで完走はする（結果は破棄される。キャンセル機構は今回のスコープ外）。
+ * ピークメモリは概ね (1 + concurrency) × maxRows 行ぶんまで膨らみうる点に注意
+ * （累積結果が最大 maxRows 行、加えて実行中の各ワーカーが fetchAllPages 内に
+ * 最大 maxRows 行のバッファを持つ。直列時の約2倍 → 並列度3で約4倍）。
+ * maxRows を引き上げるときはこの倍率も勘定に入れること。
  * 調整用の引数がすべて数値の位置引数である点は既知（issue #5、別途対応中）。
  * `fetchChunkPage` は `(chunk, from, to)` を受け、`.in(column, chunk).order(...).range(from, to)`
  * を組むこと。keys は重複除去してから使うので、呼び出し側で dedupe しなくてよい。
@@ -140,7 +144,10 @@ export async function fetchInChunks<K, T>(
     Number.isFinite(concurrency) && concurrency >= 1
       ? Math.floor(concurrency)
       : SUPABASE_CHUNK_CONCURRENCY;
-  const workerCount = Math.min(limit, chunks.length);
+  // ワーカー0本だと Promise.all([]) が即解決し、エラーも出さずに [] を返してしまう
+  // （このモジュールが排除している「静かな嘘」そのもの）。上のガードを将来の変更が
+  // 壊しても、最低1本は必ず走るよう構造的に下限を固定する。
+  const workerCount = Math.max(1, Math.min(limit, chunks.length));
 
   const resultsByChunk: T[][] = new Array(chunks.length);
   let totalRows = 0;
