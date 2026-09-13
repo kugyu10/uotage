@@ -19,9 +19,30 @@ import {
   type ImportSummary,
 } from "@/lib/csv/import-batches";
 import { jstDatetimeLocalToUtcIso } from "@/lib/csv/timezone";
+import {
+  consumeRateLimit,
+  IMPORT_RATE_LIMIT_MAX_REQUESTS,
+  IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+  importRateLimitKey,
+} from "@/lib/rate-limit";
 import { fetchAllPages, fetchInChunks } from "@/lib/supabase/paginate";
 
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+
+const RATE_LIMIT_ERROR = "短時間に操作が集中しています。1分ほど待ってから再度お試しください。";
+
+/**
+ * ドライラン・確定実行の両方で、重い処理（DB照会・8MBまでのボディのパース）より前に
+ * レートリミットを1回消費する（issue #3）。上限は経路合算で1分10回。
+ */
+async function consumeImportRateLimit(userId: string): Promise<boolean> {
+  return consumeRateLimit(
+    createAdminClient(),
+    importRateLimitKey(userId),
+    IMPORT_RATE_LIMIT_MAX_REQUESTS,
+    IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+  );
+}
 
 export type DeliveryMode = "none" | "from_now" | "from_start";
 
@@ -53,7 +74,11 @@ export async function previewImport(
     return { status: "error", error: "シナリオが見つかりません。" };
   }
 
-  const { supabase, operator } = await requireOperator();
+  const { supabase, operator, userId } = await requireOperator();
+
+  if (!(await consumeImportRateLimit(userId))) {
+    return { status: "error", error: RATE_LIMIT_ERROR };
+  }
 
   const { data: scenario } = await supabase
     .from("scenarios")
@@ -232,7 +257,11 @@ export async function confirmImport(
     return { status: "error", error: "シナリオが見つかりません。" };
   }
 
-  const { supabase, operator } = await requireOperator();
+  const { supabase, operator, userId } = await requireOperator();
+
+  if (!(await consumeImportRateLimit(userId))) {
+    return { status: "error", error: RATE_LIMIT_ERROR };
+  }
 
   const { data: scenario } = await supabase
     .from("scenarios")
