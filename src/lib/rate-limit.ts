@@ -78,5 +78,10 @@ export async function consumeRateLimit(
     return true;
   }
 
+  // 発火（拒否）は事故検知の一次シグナルなので必ずログに残す（issue #3 の動機）。
+  if (!data) {
+    console.warn("[rate-limit] 上限超過のためリクエストを拒否", { limitKey });
+  }
+
   return data;
 }

@@ -23,14 +23,17 @@ function fakeClient(result: { data: unknown; error: unknown }) {
   return { client, calls };
 }
 
-/** fail-open 時のログ出力をテスト出力に混ぜないための一時サイレンサー。 */
-async function withSilencedConsoleError<T>(run: () => Promise<T>): Promise<T> {
-  const original = console.error;
+/** fail-open / 拒否時のログ出力をテスト出力に混ぜないための一時サイレンサー。 */
+async function withSilencedConsole<T>(run: () => Promise<T>): Promise<T> {
+  const originalError = console.error;
+  const originalWarn = console.warn;
   console.error = () => {};
+  console.warn = () => {};
   try {
     return await run();
   } finally {
-    console.error = original;
+    console.error = originalError;
+    console.warn = originalWarn;
   }
 }
 
@@ -52,12 +55,14 @@ test("consumeRateLimit は RPC の判定をそのまま返し、引数を正し�
     { fn: "consume_rate_limit", args: { limit_key: "csv-import:u1", max_requests: 10, window_seconds: 60 } },
   ]);
 
-  const denied = fakeClient({ data: false, error: null });
-  assert.equal(await consumeRateLimit(denied.client, "csv-import:u1", 10, 60), false);
+  await withSilencedConsole(async () => {
+    const denied = fakeClient({ data: false, error: null });
+    assert.equal(await consumeRateLimit(denied.client, "csv-import:u1", 10, 60), false);
+  });
 });
 
 test("consumeRateLimit は RPC 失敗時に fail-open で true を返す（機能全体を止めない）", async () => {
-  await withSilencedConsoleError(async () => {
+  await withSilencedConsole(async () => {
     const failed = fakeClient({ data: null, error: { message: "function does not exist" } });
     assert.equal(await consumeRateLimit(failed.client, "csv-import:u1", 10, 60), true);
 

@@ -17,6 +17,10 @@ const serverTs = await read('../src/lib/supabase/server.ts');
 test('consume_rate_limit は SECURITY DEFINER + service_role 限定で、テーブルは RPC 以外から触れない', () => {
   assert.match(migrationSql, /security definer/);
   assert.match(migrationSql, /set search_path = ''/);
+  // on conflict (limit_key, ...) の推論句は引数 limit_key と衝突して 42702 になる。
+  // register_reader の同種障害 (20260902020000) と同じ対策が入っていること。
+  // 実挙動の確認は scripts/verify-rate-limit.mjs（migration 適用後に必ず実行）。
+  assert.match(migrationSql, /#variable_conflict use_column/);
   assert.match(migrationSql, /revoke all on function public\.consume_rate_limit\(text, integer, integer\) from public/);
   assert.match(migrationSql, /grant execute on function public\.consume_rate_limit\(text, integer, integer\) to service_role/);
   // RLS 有効・ポリシー無し = service_role（RLSを通らない）以外はテーブルに触れない。

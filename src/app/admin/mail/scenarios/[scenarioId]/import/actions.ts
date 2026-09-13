@@ -32,16 +32,30 @@ const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 const RATE_LIMIT_ERROR = "短時間に操作が集中しています。1分ほど待ってから再度お試しください。";
 
 /**
- * ドライラン・確定実行の両方で、重い処理（DB照会・8MBまでのボディのパース）より前に
- * レートリミットを1回消費する（issue #3）。上限は経路合算で1分10回。
+ * ドライラン・確定実行の両方で、CSVパースと DB 照会・RPC より前にレートリミットを
+ * 1回消費する（issue #3）。上限は経路合算で1分10回。
+ *
+ * 注意: リクエストボディ（最大8MB）の受信と multipart デコード自体は、Server Action が
+ * 呼ばれる前に Next.js が完了させている。ここで節約できるのはパース以降と DB 往復であり、
+ * 「8MBの受信そのもの」を止められるのは基盤側（WAF等）のレートリミットだけ。
+ *
+ * fail-open は例外経路まで含めて成立させる（createAdminClient は環境変数欠落で throw
+ * しうる。レートリミットの障害でインポート全体を落とさない）。
  */
 async function consumeImportRateLimit(userId: string): Promise<boolean> {
-  return consumeRateLimit(
-    createAdminClient(),
-    importRateLimitKey(userId),
-    IMPORT_RATE_LIMIT_MAX_REQUESTS,
-    IMPORT_RATE_LIMIT_WINDOW_SECONDS,
-  );
+  try {
+    return await consumeRateLimit(
+      createAdminClient(),
+      importRateLimitKey(userId),
+      IMPORT_RATE_LIMIT_MAX_REQUESTS,
+      IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+    );
+  } catch (error) {
+    console.error("[rate-limit] 消費処理で例外（fail-open で続行）", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
 }
 
 export type DeliveryMode = "none" | "from_now" | "from_start";
