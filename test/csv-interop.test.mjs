@@ -258,11 +258,17 @@ test('confirmImport supports exactly the three resend-prevention delivery modes,
 
 test('the confirm/execute form only renders after a successful dry run, and defaults to the safest option', () => {
   assert.match(importWizard, /previewState\.status === "ready"/);
-  const confirmFormSection = importWizard.slice(
+  // issue #2 以降、確定実行は独立した <form> ではなく、ドライランと同じ form 内の
+  // submit ボタン（formAction={confirmAction}）になった。ドライラン成功後にしか
+  // 確定ボタンが出ない、という性質は previewState.status === "ready" ブロックの
+  // 内側にだけ formAction={confirmAction} が現れることで確認する。
+  const readySection = importWizard.slice(
     importWizard.indexOf('previewState.status === "ready"'),
     importWizard.lastIndexOf('</div>'),
   );
-  assert.match(confirmFormSection, /<form action=\{confirmAction\}>/);
+  assert.match(readySection, /formAction=\{confirmAction\}/);
+  const beforeReadySection = importWizard.slice(0, importWizard.indexOf('previewState.status === "ready"'));
+  assert.doesNotMatch(beforeReadySection, /formAction=\{confirmAction\}/);
   assert.match(importWizard, /useState<DeliveryMode>\("none"\)/);
   assert.match(importWizard, /value="none"/);
   assert.match(importWizard, /value="from_now"/);

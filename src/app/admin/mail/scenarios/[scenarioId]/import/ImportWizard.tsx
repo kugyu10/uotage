@@ -17,7 +17,9 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
   const [previewState, previewAction, previewPending] = useActionState(boundPreviewImport, initialPreviewState);
 
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>("none");
-  const boundConfirmImport = confirmImport.bind(null, scenarioId, previewState.validRows ?? []);
+  // 確定実行にはファイルそのものを再送してサーバーで再パースする（issue #2）。
+  // クライアントへ戻すのはドライランしたファイルのハッシュだけで、検証済み行は往復しない。
+  const boundConfirmImport = confirmImport.bind(null, scenarioId, previewState.fileHash);
   const [confirmState, confirmAction, confirmPending] = useActionState(boundConfirmImport, initialConfirmState);
 
   // 確定実行はRPCを複数回に分けて呼ぶため、途中で失敗すると「先頭から一部だけ反映済み」
@@ -55,6 +57,9 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
 
   return (
     <div>
+      {/* file input は1つの form に置き、ドライランと確定実行は submit ボタンの formAction で
+          出し分ける。確定実行のリクエストにも同じファイルが含まれるため、サーバー側で
+          再パースでき、検証済み行を RSC ペイロードで往復させずに済む（issue #2）。 */}
       <form action={previewAction}>
         <p>
           <label>
@@ -63,41 +68,39 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
             <input type="file" name="file" accept=".csv,text/csv" required />
           </label>
         </p>
-        <button type="submit" disabled={previewPending}>
+        <button type="submit" disabled={previewPending || confirmPending}>
           {previewPending ? "確認中…" : "ドライラン実行"}
         </button>
-      </form>
 
-      {previewState.status === "error" && <p role="alert">{previewState.error}</p>}
+        {previewState.status === "error" && <p role="alert">{previewState.error}</p>}
 
-      {previewState.status === "ready" && (
-        <div>
-          <h2>ドライラン結果: {previewState.fileName}</h2>
-          <ul>
-            <li>取り込み対象行数: {previewState.totalRows}件</li>
-            <li>新規読者: {previewState.newReaders}件</li>
-            <li>既存読者（更新）: {previewState.existingReaders}件</li>
-            <li>このシナリオへ既に登録済み（スキップ対象）: {previewState.alreadyEnrolled}件</li>
-            <li>自動作成されるラベル: {previewState.newLabels && previewState.newLabels.length > 0 ? previewState.newLabels.join(", ") : "なし"}</li>
-          </ul>
+        {previewState.status === "ready" && (
+          <div>
+            <h2>ドライラン結果: {previewState.fileName}</h2>
+            <ul>
+              <li>取り込み対象行数: {previewState.totalRows}件</li>
+              <li>新規読者: {previewState.newReaders}件</li>
+              <li>既存読者（更新）: {previewState.existingReaders}件</li>
+              <li>このシナリオへ既に登録済み（スキップ対象）: {previewState.alreadyEnrolled}件</li>
+              <li>自動作成されるラベル: {previewState.newLabels && previewState.newLabels.length > 0 ? previewState.newLabels.join(", ") : "なし"}</li>
+            </ul>
 
-          {previewState.invalidRows && previewState.invalidRows.length > 0 && (
-            <div>
-              <h3>不正行（{previewState.invalidRowsTotal ?? previewState.invalidRows.length}件、取り込み対象外）</h3>
-              <ul>
-                {previewState.invalidRows.map((row) => (
-                  <li key={row.line}>
-                    {row.line}行目: {row.reason}
-                  </li>
-                ))}
-              </ul>
-              {(previewState.invalidRowsTotal ?? 0) > previewState.invalidRows.length && (
-                <p>先頭{previewState.invalidRows.length}件のみ表示しています。</p>
-              )}
-            </div>
-          )}
+            {previewState.invalidRows && previewState.invalidRows.length > 0 && (
+              <div>
+                <h3>不正行（{previewState.invalidRowsTotal ?? previewState.invalidRows.length}件、取り込み対象外）</h3>
+                <ul>
+                  {previewState.invalidRows.map((row) => (
+                    <li key={row.line}>
+                      {row.line}行目: {row.reason}
+                    </li>
+                  ))}
+                </ul>
+                {(previewState.invalidRowsTotal ?? 0) > previewState.invalidRows.length && (
+                  <p>先頭{previewState.invalidRows.length}件のみ表示しています。</p>
+                )}
+              </div>
+            )}
 
-          <form action={confirmAction}>
             <fieldset>
               <legend>再送防止オプション</legend>
               <p>
@@ -150,12 +153,12 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
 
             {confirmState.status === "error" && <p role="alert">{confirmState.error}</p>}
 
-            <button type="submit" disabled={confirmPending}>
+            <button type="submit" formAction={confirmAction} disabled={confirmPending || previewPending}>
               {confirmPending ? "実行中…" : "この内容で確定して実行"}
             </button>
-          </form>
-        </div>
-      )}
+          </div>
+        )}
+      </form>
     </div>
   );
 }

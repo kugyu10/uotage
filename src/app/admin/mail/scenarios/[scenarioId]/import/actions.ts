@@ -6,14 +6,14 @@ import { createUrlToken } from "@/lib/registration";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireOperator } from "@/lib/supabase/server";
 import { isUuid } from "@/lib/uuid";
-import { parseImportCsv, type InvalidImportRow, type NormalizedImportRow } from "@/lib/csv/import-rows";
+import { hashImportCsvText } from "@/lib/csv/file-hash";
+import { parseImportCsv, type InvalidImportRow } from "@/lib/csv/import-rows";
 import {
   addImportSummary,
   checkImportRowLimit,
   chunkRows,
   EMPTY_IMPORT_SUMMARY,
   IMPORT_BATCH_SIZE,
-  MAX_IMPORT_ROWS,
   MAX_INVALID_ROWS_SHOWN,
   toImportSummary,
   type ImportSummary,
@@ -38,7 +38,11 @@ export interface PreviewState {
   invalidRows?: InvalidImportRow[];
   /** 不正行の総数（invalidRows は切られている可能性があるため別に持つ）。 */
   invalidRowsTotal?: number;
-  validRows?: NormalizedImportRow[];
+  /**
+   * ドライランしたファイル内容の SHA-256。確定実行はファイルを再パースするため、
+   * 検証済み行の代わりにこのハッシュだけを `.bind()` でサーバーへ戻す（issue #2）。
+   */
+  fileHash?: string;
 }
 
 export const initialPreviewState: PreviewState = { status: "idle" };
@@ -184,7 +188,7 @@ export async function previewImport(
     newLabels,
     invalidRows: parsed.invalidRows.slice(0, MAX_INVALID_ROWS_SHOWN),
     invalidRowsTotal: parsed.invalidRows.length,
-    validRows: parsed.rows,
+    fileHash: hashImportCsvText(text),
   };
 }
 
@@ -205,7 +209,14 @@ export interface ConfirmState {
 export const initialConfirmState: ConfirmState = { status: "idle" };
 
 /**
- * 確定実行: ドライランで検証済みの行だけを受け取り、SECURITY DEFINER RPCへ委譲する。
+ * 確定実行: アップロードされたCSVファイルをサーバーで再パースし、SECURITY DEFINER RPCへ委譲する。
+ *
+ * 検証済み行の配列をクライアント経由で受け取る方式はやめた（issue #2。5,000行で1MB前後の
+ * ペイロードが RSC で下り `.bind()` で戻る無駄な往復になっていた）。代わりに確定実行の
+ * リクエストにもファイルそのものを含め、ここで再パースする。「ドライランで確認した
+ * ファイルと同じものか」は previewImport が返したハッシュ（expectedFileHash、`.bind()` で
+ * 受け取るため改竄不可）との照合で担保する。これによりドライランを経ない取り込み・
+ * ドライラン後に差し替えたファイルの取り込みはどちらも弾かれる。
  *
  * RPCは行ごとに `select ... for update` とラベル解決を回すため、全行を1トランザクションに
  * 渡すと statement timeout に当たる。IMPORT_BATCH_SIZE 件ずつに分けて複数回呼び出し、
@@ -224,7 +235,7 @@ export const initialConfirmState: ConfirmState = { status: "idle" };
  */
 export async function confirmImport(
   scenarioId: string,
-  validRows: NormalizedImportRow[],
+  expectedFileHash: string | undefined,
   _prevState: ConfirmState,
   formData: FormData,
 ): Promise<ConfirmState> {
@@ -244,12 +255,43 @@ export async function confirmImport(
     return { status: "error", error: "シナリオが見つかりません。" };
   }
 
-  if (!validRows || validRows.length === 0) {
-    return { status: "error", error: "取り込み対象の行がありません。もう一度ドライランを実行してください。" };
+  // ドライラン必須。expectedFileHash はドライラン成功時にしか発行されない。
+  if (!expectedFileHash) {
+    return { status: "error", error: "先にドライランを実行してください。" };
   }
-  // ドライラン側でも弾いているが、古いプレビュー結果が残っている可能性があるため確定実行でも見る。
-  if (validRows.length > MAX_IMPORT_ROWS) {
-    return { status: "error", error: checkImportRowLimit(validRows.length, 0) ?? "行数が多すぎます。" };
+
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    return { status: "error", error: "CSVファイルを選択して、もう一度ドライランからやり直してください。" };
+  }
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
+  }
+
+  const text = await file.text();
+  // ドライランで件数を確認したファイルと中身が同じであることを、パースより先に確かめる。
+  // 一致しなければ「表示された件数」と「実際に取り込まれる内容」がずれるため取り込まない。
+  if (hashImportCsvText(text) !== expectedFileHash) {
+    return {
+      status: "error",
+      error: "ドライラン後にファイルが変更されています。もう一度ドライランからやり直してください。",
+    };
+  }
+
+  // ハッシュが一致した時点でドライランと同一テキストなのでパースは成功するはずだが、防御的に扱う。
+  let parsed;
+  try {
+    parsed = parseImportCsv(text);
+  } catch {
+    return { status: "error", error: "CSVの読み込みに失敗しました。もう一度ドライランからやり直してください。" };
+  }
+
+  const rowLimitError = checkImportRowLimit(parsed.rows.length, parsed.invalidRows.length);
+  if (rowLimitError) {
+    return { status: "error", error: rowLimitError };
+  }
+  if (parsed.rows.length === 0) {
+    return { status: "error", error: "取り込み対象の行がありません。もう一度ドライランを実行してください。" };
   }
 
   const deliveryModeRaw = formData.get("deliveryMode");
@@ -277,7 +319,7 @@ export async function confirmImport(
     }
   }
 
-  const rowsPayload = validRows.map((row) => ({
+  const rowsPayload = parsed.rows.map((row) => ({
     email: row.email,
     name: row.name,
     registration_path: row.registrationPath,

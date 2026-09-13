@@ -105,6 +105,33 @@ test('バッチ途中の失敗は status="partial" として、どこまで反�
   assert.match(confirmFn, /if \(processedRows === 0\)/);
 });
 
+test('confirmImport は検証済み行を受け取らず、ファイルを再パースする (issue #2)', () => {
+  const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
+  // 確定実行のリクエストに含まれたファイルをサーバーで読み直し、パースと行数上限を再適用する。
+  assert.match(confirmFn, /formData\.get\("file"\)/);
+  assert.match(confirmFn, /parseImportCsv\(text\)/);
+  assert.match(confirmFn, /checkImportRowLimit\(parsed\.rows\.length, parsed\.invalidRows\.length\)/);
+  assert.match(confirmFn, /file\.size > MAX_FILE_SIZE_BYTES/);
+  // 検証済み行の配列をクライアント経由で受ける実装（RSCペイロード往復）に戻っていないこと。
+  // （\b が無いと invalidRows に部分一致してしまう）
+  assert.doesNotMatch(importActions, /\bvalidRows\b/);
+  assert.doesNotMatch(importWizard, /\bvalidRows\b/);
+});
+
+test('確定実行はドライラン済みファイルとの同一性をハッシュで検証する (issue #2)', () => {
+  const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
+  // ドライランがハッシュを発行し、確定実行はパースより先に照合する。
+  assert.match(previewFn, /fileHash: hashImportCsvText\(text\)/);
+  assert.match(confirmFn, /if \(!expectedFileHash\)/);
+  assert.match(confirmFn, /hashImportCsvText\(text\) !== expectedFileHash/);
+  // ウィザードが bind で戻すのはハッシュだけ（bind 引数は暗号化されるため改竄できない）。
+  assert.match(importWizard, /confirmImport\.bind\(null, scenarioId, previewState\.fileHash\)/);
+  // ドライランと確定実行が同じ form の file input を共有していること（ボタンの formAction で出し分け）。
+  assert.match(importWizard, /formAction=\{confirmAction\}/);
+  const fileInputs = importWizard.match(/type="file"/g) ?? [];
+  assert.equal(fileInputs.length, 1, 'file input が複数あると再送されるファイルが曖昧になる');
+});
+
 test('UIは部分適用を専用の文言で伝え、再実行が安全であることを案内する', () => {
   assert.match(importWizard, /confirmState\.status === "partial"/);
   assert.match(importWizard, /先頭から\{confirmState\.processedRows\}行目までは反映済みです/);
