@@ -7,9 +7,15 @@ import test from "node:test";
 import {
   fetchAllPages,
   fetchInChunks,
+  SUPABASE_CHUNK_CONCURRENCY,
   SUPABASE_IN_CHUNK_SIZE,
   TOO_MANY_ROWS,
 } from "../../src/lib/supabase/paginate.ts";
+
+/** マイクロタスクを1回挟むだけの遅延。setTimeout より速く、実行順序の検証に十分。 */
+function microtaskDelay(): Promise<void> {
+  return Promise.resolve().then(() => Promise.resolve());
+}
 
 /** rows を `.range(from, to)` と同じ意味で切り出す偽のページ取得関数。呼び出し範囲も記録する。 */
 function fakeTable<T>(rows: T[]) {
@@ -231,4 +237,132 @@ test("SUPABASE_IN_CHUNK_SIZE はURI長が破綻しない件数に収まってい
   // UUIDはURLエンコード後で1件あたり約39文字。上限を緩めたら気付けるようにする。
   const estimatedUriBytes = SUPABASE_IN_CHUNK_SIZE * 39;
   assert.ok(estimatedUriBytes < 64 * 1024, `.in() のクエリ文字列が約${estimatedUriBytes}バイトになる`);
+});
+
+// ======================= fetchInChunks の並列実行 (issue #6) =======================
+
+test("SUPABASE_CHUNK_CONCURRENCY はコネクションを食い潰さない範囲（2〜4）に収まっている", () => {
+  assert.ok(
+    SUPABASE_CHUNK_CONCURRENCY >= 2 && SUPABASE_CHUNK_CONCURRENCY <= 4,
+    `SUPABASE_CHUNK_CONCURRENCY=${SUPABASE_CHUNK_CONCURRENCY} は issue #6 で検討された範囲外`,
+  );
+});
+
+test("fetchInChunks はチャンクを concurrency 件までしか同時に実行しない", async () => {
+  const keys = Array.from({ length: 9 }, (_unused, index) => `k${index}`);
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  const fetchChunkPage = async () => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    // マイクロタスクを何度か挟んで、他のワーカーが追いつく猶予を作る。
+    await microtaskDelay();
+    await microtaskDelay();
+    inFlight -= 1;
+    return { data: [1], error: null };
+  };
+
+  await fetchInChunks<string, number>(keys, fetchChunkPage, 1, 10, 1000, 3);
+
+  assert.equal(maxInFlight, 3, "concurrency=3 を指定したのに同時実行数が異なる");
+});
+
+test("fetchInChunks は concurrency=1 なら従来どおり直列実行になる（後方互換）", async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  const fetchChunkPage = async () => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await microtaskDelay();
+    inFlight -= 1;
+    return { data: [1], error: null };
+  };
+
+  await fetchInChunks<string, number>(["a", "b", "c", "d"], fetchChunkPage, 1, 10, 1000, 1);
+
+  assert.equal(maxInFlight, 1);
+});
+
+test("fetchInChunks は同時実行でも結果をチャンクの元の並び順で連結する（解決順ではない）", async () => {
+  // 先頭のチャンクほど遅く解決するようにして、完了順と元の並び順をわざとずらす。
+  const rowsByChunk: Record<string, number> = { a: 1, b: 2, c: 3 };
+  const fetchChunkPage = async (chunk: string[]) => {
+    const key = chunk[0];
+    const delays: Record<string, number> = { a: 2, b: 1, c: 0 };
+    for (let i = 0; i < delays[key]; i += 1) {
+      await microtaskDelay();
+    }
+    return { data: [rowsByChunk[key]], error: null };
+  };
+
+  const rows = await fetchInChunks<string, number>(["a", "b", "c"], fetchChunkPage, 1, 10, 1000, 3);
+
+  // "c" が先に解決しても、結果は a, b, c の元の順序で並ぶ。
+  assert.deepEqual(rows, [1, 2, 3]);
+});
+
+test("fetchInChunks はチャンクが失敗したら以降のチャンクに新規着手しない", async () => {
+  const started: string[] = [];
+  let releaseA: (() => void) | undefined;
+
+  const fetchChunkPage = (chunk: string[]) => {
+    const key = chunk[0];
+    started.push(key);
+    if (key === "a") {
+      // "a" は手動で解決させるまで pending のままにし、"b" の失敗を先に確定させる。
+      return new Promise<{ data: number[] | null; error: unknown }>((resolve) => {
+        releaseA = () => resolve({ data: [1], error: null });
+      });
+    }
+    if (key === "b") {
+      return Promise.resolve({ data: null, error: { message: "boom" } });
+    }
+    // "c" "d" に着手してしまったら失敗させて検出する（本来ここには来ないはず）。
+    return Promise.resolve({ data: null, error: { message: `想定外に ${key} へ着手した` } });
+  };
+
+  const promise = fetchInChunks<string, number>(["a", "b", "c", "d"], fetchChunkPage, 1, 10, 1000, 2);
+  // 失敗を先送りできるよう、rejection を早期に観測しても未処理拒否にならないようにしておく。
+  promise.catch(() => {});
+
+  // "b" の失敗が worker 内で catch → hasError=true まで処理し終わるのを待つ。
+  // この時点でまだ "a" は pending なので、Promise.all 自体はまだ解決していない。
+  for (let i = 0; i < 10; i += 1) {
+    await microtaskDelay();
+  }
+  assert.deepEqual(started, ["a", "b"], "b の失敗より前に想定外のチャンクへ着手している");
+
+  // ここで初めて "a" を解決させる。"b" が既に失敗している(hasError=true)ので、
+  // "a" を終えたワーカーは次のチャンク("c")には着手せず抜けるはず。
+  releaseA?.();
+
+  await assert.rejects(promise, /boom/);
+  assert.deepEqual(started, ["a", "b"], "b の失敗後に c/d へ着手してしまっている");
+});
+
+test("fetchInChunks は不正な concurrency でも静かに空を返さず、既定の並列度で全チャンクを取り切る", async () => {
+  // ガードが壊れて workerCount が 0 になると、Promise.all([]) が即解決して
+  // エラーなしで [] が返る（「該当0件」と区別できない静かな嘘）。
+  // chunkSize 側の「不正な chunkSize でも既定値で割る」テストと対にする。
+  for (const bad of [0, -1, Number.NaN]) {
+    const keys = Array.from({ length: 9 }, (_unused, index) => `k${index}`);
+    let inFlight = 0;
+    let maxInFlight = 0;
+
+    const fetchChunkPage = async (chunk: string[]) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await microtaskDelay();
+      await microtaskDelay();
+      inFlight -= 1;
+      return { data: [chunk[0]], error: null };
+    };
+
+    const rows = await fetchInChunks<string, string>(keys, fetchChunkPage, 1, 10, 1000, bad);
+
+    assert.deepEqual(rows, keys, `concurrency=${bad} で結果が欠けるか順序が崩れた`);
+    assert.equal(maxInFlight, SUPABASE_CHUNK_CONCURRENCY, `concurrency=${bad} が既定の並列度に落ちていない`);
+  }
 });
