@@ -32,5 +32,7 @@ export async function requireOperator() {
     .maybeSingle();
   if (!operator) redirect("/login?error=operator");
 
-  return { supabase, operator };
+  // userId は per-operator のレートリミットキーに使う（issue #3）。operators テーブルの
+  // 行 id ではなく auth のユーザー id を返すのは、ここで追加の select を増やさないため。
+  return { supabase, operator, userId: auth.user.id };
 }
