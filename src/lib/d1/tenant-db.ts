@@ -179,62 +179,123 @@ function touchedTables(masked: string, tables: readonly string[]): string[] {
   );
 }
 
-/** insert into <table> (<cols>) values (<vals>) の列・値リストを取り出す（無ければ null）。 */
-function parseInsertColumnsAndValues(masked: string): { columns: string[]; values: string[] } | null {
-  const match = /insert\s+into\s+[\w."`[\]]+\s*\(([^)]*)\)\s*values\s*\(([^)]*)\)/i.exec(masked);
-  if (!match) return null;
-  return {
-    columns: splitTopLevel(match[1]).map((c) => stripIdentifierQuotes(c).trim().toLowerCase()),
-    values: splitTopLevel(match[2]).map((v) => v.trim()),
-  };
+/**
+ * 先頭から、かっこの深さを見ながらトップレベルの `(...)` グループを連続して取り出す。
+ * グループの間はカンマ・空白のみ許容し、それ以外の文字（`on conflict` 等）に出会ったら止める。
+ * `values (a, b), (c, d)` のような多値 insert の全タプルを取り出すために使う。
+ */
+function extractParenGroups(s: string): string[] {
+  const groups: string[] = [];
+  let i = 0;
+  const n = s.length;
+  while (i < n) {
+    while (i < n && /\s/.test(s[i])) i += 1;
+    if (i < n && s[i] === ",") {
+      i += 1;
+      continue;
+    }
+    if (i >= n || s[i] !== "(") break;
+    const start = i;
+    let depth = 0;
+    for (; i < n; i += 1) {
+      if (s[i] === "(") depth += 1;
+      else if (s[i] === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          i += 1;
+          break;
+        }
+      }
+    }
+    groups.push(s.slice(start + 1, i - 1));
+  }
+  return groups;
 }
 
 /**
- * insert の列リストで tenant_id が置かれている「位置」の値が、厳密に `:tenant` であることを
- * 確認する。列リストに tenant_id はあるが値の位置がずれている（列の並べ間違い）場合は false。
+ * insert into <table> (<cols>) values (<vals>), (<vals>), ... の列リストと、
+ * **全ての** VALUES タプルを取り出す（無ければ null）。
+ * 旧実装は正規表現が最初の1タプルしか捕まえられず、多値 insert の2行目以降が
+ * 無検査ですり抜けていた（PR #22 レビュー 🟡A）。
+ */
+function parseInsertColumnsAndValues(masked: string): { columns: string[]; valueTuples: string[][] } | null {
+  const match = /insert\s+into\s+[\w."`[\]]+\s*\(([^)]*)\)\s*values\s*([\s\S]*)/i.exec(masked);
+  if (!match) return null;
+  const columns = splitTopLevel(match[1]).map((c) => stripIdentifierQuotes(c).trim().toLowerCase());
+  const tupleStrings = extractParenGroups(match[2]);
+  if (tupleStrings.length === 0) return null;
+  const valueTuples = tupleStrings.map((t) => splitTopLevel(t).map((v) => v.trim()));
+  return { columns, valueTuples };
+}
+
+/**
+ * insert の列リストで tenant_id が置かれている「位置」の値が、**全タプルについて**
+ * 厳密に `:tenant` であることを確認する。列リストに tenant_id はあるが値の位置が
+ * ずれている（列の並べ間違い）タプルが1つでもあれば false。
  */
 function insertColumnPositionOk(masked: string): boolean {
   const parsed = parseInsertColumnsAndValues(masked);
   if (!parsed) return false;
   const idx = parsed.columns.indexOf("tenant_id");
-  if (idx === -1 || idx >= parsed.values.length) return false;
-  return /^:tenant$/i.test(parsed.values[idx]);
+  if (idx === -1) return false;
+  return parsed.valueTuples.every((tuple) => idx < tuple.length && /^:tenant$/i.test(tuple[idx]));
+}
+
+/**
+ * insert ... select の列リストと select の projection リストを、位置で1対1に対応させて
+ * tenant_id 列の位置の projection 式が厳密に `:tenant` であることを確認する。
+ * `select *` や `union` を含む形は静的に安全と判定できないため素直に false（拒否）にする
+ * （PR #22 レビュー 🟡A: 「select 由来のため位置検査は意味を持たない」は誤りだった）。
+ */
+function insertSelectColumnPositionOk(masked: string): boolean {
+  const match = /insert\s+into\s+[\w."`[\]]+\s*\(([^)]*)\)\s*select\s+([\s\S]*?)\s+from\b/i.exec(masked);
+  if (!match) return false;
+  const columns = splitTopLevel(match[1]).map((c) => stripIdentifierQuotes(c).trim().toLowerCase());
+  const idx = columns.indexOf("tenant_id");
+  if (idx === -1) return false;
+  const projection = splitTopLevel(match[2]).map((v) => v.trim());
+  if (projection.some((p) => p.includes("*"))) return false;
+  if (idx >= projection.length) return false;
+  if (/\bunion\b/i.test(masked)) return false;
+  return /^:tenant$/i.test(projection[idx]);
 }
 
 /**
  * テナント境界の検査（masked 済み SQL を受け取る）。
  *   - select / update / delete: `tenant_id = :tenant` が必須。
- *   - insert ... values: 列リストの tenant_id の位置の値が厳密に `:tenant` であること。
- *   - insert ... select: コピー元も絞る必要があるため、列リストに tenant_id があり、かつ
- *     `tenant_id = :tenant` があること（値の位置検査は select 由来のため意味を持たない）。
+ *   - insert ... values: 列リストの tenant_id の位置の値が、全 VALUES タプルについて
+ *     厳密に `:tenant` であること。
+ *   - insert ... select: コピー元も絞る必要があるため、列リストの tenant_id の位置に
+ *     対応する projection 式が厳密に `:tenant` であること（列の並べ間違いを検出できる）。
  */
 function hasTenantGuard(masked: string): boolean {
-  const hasEqMarker = /tenant_id\s*=\s*:tenant\b/i.test(masked);
   const isInsert = /^\s*insert\s+into\s+[\w."`[\]]+\s*\(/i.test(masked);
   if (isInsert) {
     const insertsFromSelect = /\)\s*select\b/i.test(masked);
     if (insertsFromSelect) {
-      const colMatch = /insert\s+into\s+[\w."`[\]]+\s*\(([^)]*)\)/i.exec(masked);
-      const columnsIncludeTenant = colMatch
-        ? splitTopLevel(colMatch[1])
-            .map((c) => stripIdentifierQuotes(c).trim().toLowerCase())
-            .includes("tenant_id")
-        : false;
-      return columnsIncludeTenant && hasEqMarker;
+      return insertSelectColumnPositionOk(masked);
     }
     return insertColumnPositionOk(masked);
   }
+  const hasEqMarker = /tenant_id\s*=\s*:tenant\b/i.test(masked);
   return hasEqMarker;
 }
 
-/** update の set 句が tenant_id を再代入しようとしていないかを確認する。 */
-function updateReassignsTenantId(masked: string): boolean {
-  const match = /^\s*update\s+[\w."`[\]]+\s+set\s+([\s\S]*?)(\bwhere\b[\s\S]*)?$/i.exec(masked);
+/**
+ * `update ... set ...` および upsert の `insert ... on conflict ... do update set ...` の
+ * set 句が tenant_id を再代入しようとしていないかを確認する。
+ * 旧実装は (1) 文頭が `update` の文にしか発火せず `on conflict ... do update set` をすり抜け、
+ * (2) 左辺の引用識別子 `"tenant_id"` を剥がしていなかったため検出をすり抜けていた
+ * （PR #22 レビュー 🟡B）。
+ */
+function reassignsTenantId(masked: string): boolean {
+  const match = /\bset\s+([\s\S]*?)(\bwhere\b[\s\S]*|\breturning\b[\s\S]*)?$/i.exec(masked);
   if (!match) return false;
   const setClause = match[1];
-  return splitTopLevel(setClause).some((assignment) =>
-    /^\s*[\w."`[\]]*\btenant_id\b\s*=/i.test(assignment),
-  );
+  return splitTopLevel(setClause).some((assignment) => {
+    const left = stripIdentifierQuotes(assignment).trim();
+    return /^tenant_id\b\s*=/i.test(left);
+  });
 }
 
 /**
@@ -300,7 +361,7 @@ export function createTenantDb(executor: D1Executor, tenantId: string): TenantDb
       if (!hasTenantGuard(masked)) {
         throw new MissingTenantScopeError(sql, scoped);
       }
-      if (/^\s*update\b/i.test(masked) && updateReassignsTenantId(masked)) {
+      if (reassignsTenantId(masked)) {
         throw new TenantReassignmentError(sql);
       }
     } else if (idKeyed.length > 0) {

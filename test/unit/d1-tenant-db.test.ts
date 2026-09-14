@@ -135,6 +135,78 @@ test("PR #22 レビュー 🟡3: insert の列と値がずれていると（tena
   );
 });
 
+test("PR #22 再レビュー 🟡A-1: 多値 insert の2タプル目以降も列位置検査される", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  // 1タプル目は tenant_id 位置が :tenant で正しいが、2タプル目は別値になっている。
+  await assert.rejects(
+    () =>
+      tenantA.run("insert into labels (id, tenant_id, name) values (?, :tenant, ?), (?, ?, ?)", [
+        "l1",
+        "A",
+        "l2",
+        "evil-tenant",
+        "B",
+      ]),
+    MissingTenantScopeError,
+  );
+  const rows = db.prepare("select id from labels").all() as Array<{ id: string }>;
+  assert.deepEqual(rows, [], "拒否された insert で行が作られていない");
+});
+
+test("PR #22 再レビュー 🟡A-2: insert-select の projection の位置ずれは拒否される", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  // 列リストは (tenant_id, id, name) だが projection は (id, :tenant, email) で位置がずれている。
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "insert into labels (tenant_id, id, name) select id, :tenant, email from readers where tenant_id = :tenant",
+      ),
+    MissingTenantScopeError,
+  );
+
+  // projection がプレースホルダで他テナントを注入しようとする形も拒否される。
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "insert into labels (tenant_id, id, name) select ?, id, email from readers where tenant_id = :tenant",
+        ["evil-tenant"],
+      ),
+    MissingTenantScopeError,
+  );
+  const rows = db.prepare("select id from labels").all() as Array<{ id: string }>;
+  assert.deepEqual(rows, [], "拒否された insert-select で行が作られていない");
+});
+
+test("PR #22 再レビュー 🟡A-3: 列位置が正しい insert-select は許可される", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await tenantA.run(
+    "insert into labels (id, tenant_id, name) select id, :tenant, email from readers where tenant_id = :tenant",
+  );
+  const rows = (
+    db.prepare("select id, tenant_id from labels").all() as Array<Record<string, unknown>>
+  ).map((row) => ({ ...row }));
+  assert.deepEqual(rows, [{ id: "r1", tenant_id: "tenant-a" }]);
+});
+
+test("PR #22 再レビュー 🟡A-4: insert-select で select * は静的判定できないため拒否される", async () => {
+  const { executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "insert into labels (id, tenant_id, name) select * from readers where tenant_id = :tenant",
+      ),
+    MissingTenantScopeError,
+  );
+});
+
 test("PR #22 レビュー 🟡4: update の set 句で tenant_id を付け替えようとすると拒否される", async () => {
   const { db, executor } = createExecutor();
   const tenantA = createTenantDb(executor, "tenant-a");
@@ -151,6 +223,44 @@ test("PR #22 レビュー 🟡4: update の set 句で tenant_id を付け替え
     tenant_id: string;
   };
   assert.equal(untouched.tenant_id, "tenant-a", "行が別テナントへ付け替えられた");
+});
+
+test('PR #22 再レビュー 🟡B-1: update set "tenant_id" = ... のような引用識別子も付け替え拒否される', async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await assert.rejects(
+    () =>
+      tenantA.run('update readers set "tenant_id" = ? where tenant_id = :tenant and id = ?', [
+        "evil-tenant",
+        "r1",
+      ]),
+    TenantReassignmentError,
+  );
+  const untouched = db.prepare("select tenant_id from readers where id = ?").get("r1") as {
+    tenant_id: string;
+  };
+  assert.equal(untouched.tenant_id, "tenant-a", "行が別テナントへ付け替えられた");
+});
+
+test("PR #22 再レビュー 🟡B-2: upsert の on conflict do update set tenant_id も付け替え拒否される", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "insert into readers (id, tenant_id, email) values (?, :tenant, ?) on conflict(id) do update set tenant_id = ?",
+        ["r1", "z@example.com", "evil-tenant"],
+      ),
+    TenantReassignmentError,
+  );
+  const untouched = db.prepare("select tenant_id, email from readers where id = ?").get("r1") as {
+    tenant_id: string;
+    email: string;
+  };
+  assert.equal(untouched.tenant_id, "tenant-a", "行が別テナントへ付け替えられた");
+  assert.equal(untouched.email, "a@example.com", "upsert の再代入が実行されてしまった");
 });
 
 test("PR #22 レビュー 🟡5: schema 修飾・引用符付きテーブル名でもガードが効く", async () => {
@@ -203,19 +313,25 @@ test("D1 へ移す予定の全テーブルが分離対象リストに載って�
   // ハードコードした表と TENANT_SCOPED_TABLES を突き合わせると同語反復になり、
   // テーブル追加時の漏れを検出できない（PR #22 レビュー指摘）。
   // 実際の Postgres 初期スキーマから tenant_id 列を持つテーブルを抽出して突き合わせる。
-  const { readFile } = await import("node:fs/promises");
-  const migrationUrl = new URL(
-    "../../supabase/migrations/20260813104008_initial_phase1_schema.sql",
-    import.meta.url,
-  );
-  const sql = await readFile(migrationUrl, "utf8");
+  //
+  // PR #22 再レビュー 🟢D: 1ファイル（初期スキーマ）だけしか見ていないと、
+  // 以後の migration で tenant_id 付きテーブルが追加されても漏れ検出が効かない。
+  // supabase/migrations/ 配下の全 .sql から create table ブロックを集める。
+  const { readFile, readdir } = await import("node:fs/promises");
+  const migrationsDir = new URL("../../supabase/migrations/", import.meta.url);
+  const entries = await readdir(migrationsDir);
+  const sqlFiles = entries.filter((name) => name.endsWith(".sql")).sort();
+  assert.ok(sqlFiles.length > 0, "migration ファイルが1件も見つからない");
 
   const tenantScopedInSchema: string[] = [];
   const tableBlockPattern = /create table public\.(\w+) \(([\s\S]*?)\n\);/g;
-  for (const match of sql.matchAll(tableBlockPattern)) {
-    const [, tableName, body] = match;
-    if (/\btenant_id\b/.test(body)) {
-      tenantScopedInSchema.push(tableName);
+  for (const file of sqlFiles) {
+    const sql = await readFile(new URL(file, migrationsDir), "utf8");
+    for (const match of sql.matchAll(tableBlockPattern)) {
+      const [, tableName, body] = match;
+      if (/\btenant_id\b/.test(body) && !tenantScopedInSchema.includes(tableName)) {
+        tenantScopedInSchema.push(tableName);
+      }
     }
   }
 
