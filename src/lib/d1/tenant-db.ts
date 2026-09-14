@@ -270,14 +270,17 @@ function insertSelectColumnPositionOk(masked: string): boolean {
  */
 function hasTenantGuard(masked: string): boolean {
   const isInsert = /^\s*insert\s+into\s+[\w."`[\]]+\s*\(/i.test(masked);
+  const hasEqMarker = /tenant_id\s*=\s*:tenant\b/i.test(masked);
   if (isInsert) {
     const insertsFromSelect = /\)\s*select\b/i.test(masked);
     if (insertsFromSelect) {
-      return insertSelectColumnPositionOk(masked);
+      // 列位置検査（並べ間違い検出）と、コピー元 select を tenant_id = :tenant で
+      // 絞っていることの両方を要求する。位置検査だけでは insert 先の列は正しくても
+      // コピー元（select の from）が無条件になり得る（PR #22 レビュー round3 🟡F）。
+      return insertSelectColumnPositionOk(masked) && hasEqMarker;
     }
     return insertColumnPositionOk(masked);
   }
-  const hasEqMarker = /tenant_id\s*=\s*:tenant\b/i.test(masked);
   return hasEqMarker;
 }
 

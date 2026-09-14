@@ -207,6 +207,26 @@ test("PR #22 再レビュー 🟡A-4: insert-select で select * は静的判定
   );
 });
 
+test("PR #22 再レビュー round3 🟡F: insert-select のコピー元 (select) に tenant_id = :tenant の絞りが無ければ拒否される（回帰）", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  // 列位置は正しい（:tenant が tenant_id 列にマップされている）が、
+  // コピー元 select 側に tenant_id = :tenant の絞りが無い。
+  // 他テナント(tenant-b)の行 r2 まで自テナントの行として複製できてはならない。
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "insert into labels (tenant_id, id, name) select :tenant, id, email from readers",
+      ),
+    MissingTenantScopeError,
+  );
+  const rows = (
+    db.prepare("select id, tenant_id from labels").all() as Array<Record<string, unknown>>
+  ).map((row) => ({ ...row }));
+  assert.deepEqual(rows, [], "拒否された insert-select で行が作られていない");
+});
+
 test("PR #22 レビュー 🟡4: update の set 句で tenant_id を付け替えようとすると拒否される", async () => {
   const { db, executor } = createExecutor();
   const tenantA = createTenantDb(executor, "tenant-a");
