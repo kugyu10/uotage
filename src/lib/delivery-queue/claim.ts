@@ -99,15 +99,18 @@ export async function recoverStuckDeliveries(db: QueueDb, now: Date): Promise<vo
 }
 
 /**
- * claim 対象を選ぶ SELECT 文（targetDeliveryId 未指定時）。
- * `test/unit/delivery-queue-claim.test.ts` の EXPLAIN QUERY PLAN 検証はこの定数に対して行う。
+ * claim 対象を選ぶ SELECT 文を組み立てる。`claimDueDeliveries` 自身がこの関数を呼んで
+ * 実行 SQL を組み立てるため、テスト（`test/unit/delivery-queue-claim.test.ts` の
+ * EXPLAIN QUERY PLAN 検証）とここに手書きコピーが二重に存在する状態を避けている。
  * `order by` はここでは「候補として選ぶ行」を決めるだけで、行の返却順は保証しない
  * （claimDueDeliveries 側で TypeScript が返却行を並べ替える）。
  */
-export const CLAIM_CANDIDATE_SELECT_SQL = `select id from deliveries
-       where status = 'queued' and scheduled_at <= ?
+export function claimCandidateSelectSql(hasTargetFilter: boolean): string {
+  return `select id from deliveries
+       where status = 'queued' and scheduled_at <= ?${hasTargetFilter ? " and id = ?" : ""}
        order by scheduled_at, id
        limit ?`;
+}
 
 /**
  * 期限が来た queued 行を batchLimit 件まで claim し、processing にして返す。
@@ -132,7 +135,6 @@ export async function claimDueDeliveries(
   }
 
   const claimTime = toQueueTimestamp(now);
-  const targetFilter = targetDeliveryId === null ? "" : "and id = ?";
   const params: SqlParam[] =
     targetDeliveryId === null
       ? [claimTime, claimTime, batchLimit]
@@ -145,10 +147,7 @@ export async function claimDueDeliveries(
        attempt_count = attempt_count + 1,
        error_message = null
      where id in (
-       select id from deliveries
-       where status = 'queued' and scheduled_at <= ? ${targetFilter}
-       order by scheduled_at, id
-       limit ?
+       ${claimCandidateSelectSql(targetDeliveryId !== null)}
      )
      returning id, tenant_id, scenario_reader_id, step_message_id, reader_id, scheduled_at, attempt_count`,
     params,

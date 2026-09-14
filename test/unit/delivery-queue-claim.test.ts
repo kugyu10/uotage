@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 import {
-  CLAIM_CANDIDATE_SELECT_SQL,
+  claimCandidateSelectSql,
   claimDueDeliveries,
   D1_MAX_BIND_PARAMS,
   DELIVERY_CLAIM_MAX_BATCH,
@@ -122,9 +122,9 @@ test("claim の batchLimit は 1〜上限の整数のみ受け付ける（RPC �
   }
 });
 
-test("claim の候補選択は claim.ts が実際に使う SQL 定数そのものを EXPLAIN する（(status, scheduled_at, id) の covering index を使い、temp b-tree を発生させない）", () => {
+test("claim の候補選択は claimDueDeliveries が実際に組み立てる SQL（claimCandidateSelectSql）そのものを EXPLAIN する（(status, scheduled_at, id) の covering index を使い、temp b-tree を発生させない）", () => {
   const { db } = createDb();
-  const plan = db.prepare(`explain query plan ${CLAIM_CANDIDATE_SELECT_SQL}`).all(
+  const plan = db.prepare(`explain query plan ${claimCandidateSelectSql(false)}`).all(
     toQueueTimestamp(NOW),
     500,
   ) as Array<{ detail: string }>;
