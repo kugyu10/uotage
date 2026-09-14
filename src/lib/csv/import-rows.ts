@@ -1,6 +1,7 @@
 // 相対importは拡張子(.ts/.tsx)を明記する（リポジトリ全体の規約。issue #4 で決定）。
-// `node --test --experimental-strip-types` はバンドラのような拡張子補完を行わず、
-// 拡張子なしの相対importは ERR_MODULE_NOT_FOUND になるため
+// 目的は規約の単一化（「どこを触っているかで書き方が変わる」状態の解消）。
+// `.ts` の拡張子明記は `node --test --experimental-strip-types` からの直接importにも
+// 寄与するが、`.tsx` は node の型ストリッピング対象外なので寄与しない（表記統一のみ）。
 // （tsconfig の allowImportingTsExtensions で型検査・ビルドは通る）。
 // 規約は test/import-extension-convention.test.mjs が機械的に強制する。
 import { parseCsv } from "./parse.ts";
