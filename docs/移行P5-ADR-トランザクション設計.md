@@ -48,12 +48,33 @@ DO はシングルスレッドなので「読む → 判断 → batch() で書�
 `src/lib/d1/tenant-db.ts` の `createTenantDb(executor, tenantId)` を D1 アクセスの唯一の入口にする。
 
 - テナント分離対象テーブルに触れる SQL は `tenant_id = :tenant` マーカーが無いと実行前に例外
-- `:tenant` には認証済みオペレーターの tenantId（`requireOperator` 相当で解決した値）だけが入る。
-  呼び出し側は別テナントをバインドできない
+- `:tenant` には呼び出し側が渡した tenantId がそのまま入る。**これは呼び出し規約であり、
+  型レベルでは強制していない**。`createTenantDb` は空でない文字列であれば何でも受け取る。
+  「認証済みオペレーターの tenantId（`requireOperator` 相当で解決した値）だけを渡す」ことは
+  呼び出し側の責務として doc コメントで明記するに留まる（PR #22 レビュー 🟢11 対応:
+  当初の記述はここを型で保証しているかのように読めたため修正した）
 - 越境テスト（`test/unit/d1-tenant-db.test.ts`）を CI で回す
 - 限界も明記している: join の各テーブルまでは静的検査しない／意図的な迂回は防げない。
   これは「付け忘れ事故」を防ぐ装置であり、`is_tenant_operator()` が担っていた
   「認証ユーザー→テナント」の解決はアプリ層のガード（現行 `requireOperator`）が引き続き担う
+
+## DO を経由しない書き込み経路（PR #22 レビュー 🟡6 対応）
+
+方式Aは「上記3関数に相当する書き込みはすべて DO 経由にする」としているが、
+このシステムには DO を通らない書き込み経路が既にある。DO 内の「読む → 判断 → `batch()` で書く」の
+読み取りと、これらの経路の書き込みは実行モデルレベルでは競合しうるため、経路ごとに扱いを決める。
+
+- **毎分 cron の配信ディスパッチ**（`supabase/cron/dispatch-deliveries.sql` の `claim_deliveries`。
+  P4 で D1 側へ移植予定）: `deliveries` を直接 claim・更新する。3関数側（特に `register_reader` の
+  キュー投入）と `deliveries` を共有するため、(a) DO 経由に寄せるか、(b) `claim_deliveries` 側を
+  `status` 列の CAS（`update ... where status = 'pending'` のような楽観ロック、現行実装が既にこの形）
+  に保つかを、P5 着手時に選ぶ。現行の `claim_deliveries` は行単位の CAS で更新しており、
+  DO 側が `deliveries` に書く操作（新規 INSERT が中心）と行が重ならない限り実害は無いと見込むが、
+  **P5 着手時に「DO 側が deliveries の既存行を UPDATE するケースが無いこと」を確認すること**。
+- **Stripe webhook**（`process_stripe_purchase` 系）: 外部から任意タイミングで叩かれる。
+  webhook ハンドラ自体を DO 経由に寄せる（方式A の対象3関数の1つなので、実装時に自然と DO 経由になる）。
+- 上記いずれも、移植時点で「DO 側と書き込みが重なる行が無い」ことをテストで固定できない場合は、
+  `deliveries` の該当列に楽観ロック（バージョン列 or CAS 条件）を追加する方針とする。
 
 ## この決定が覆る条件
 
