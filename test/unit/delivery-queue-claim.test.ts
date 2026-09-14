@@ -7,7 +7,9 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 import {
+  CLAIM_CANDIDATE_SELECT_SQL,
   claimDueDeliveries,
+  D1_MAX_BIND_PARAMS,
   DELIVERY_CLAIM_MAX_BATCH,
   markDeliveriesSkipped,
   markDeliverySent,
@@ -120,16 +122,50 @@ test("claim の batchLimit は 1〜上限の整数のみ受け付ける（RPC �
   }
 });
 
-test("claim の候補選択は (status, scheduled_at) インデックスを使う（D1 の rows read 課金対策）", () => {
+test("claim の候補選択は claim.ts が実際に使う SQL 定数そのものを EXPLAIN する（(status, scheduled_at, id) の covering index を使い、temp b-tree を発生させない）", () => {
   const { db } = createDb();
-  const plan = db
-    .prepare(
-      `explain query plan select id from deliveries
-       where status = 'queued' and scheduled_at <= ? order by scheduled_at, id limit ?`,
-    )
-    .all(toQueueTimestamp(NOW), 500) as Array<{ detail: string }>;
+  const plan = db.prepare(`explain query plan ${CLAIM_CANDIDATE_SELECT_SQL}`).all(
+    toQueueTimestamp(NOW),
+    500,
+  ) as Array<{ detail: string }>;
   const detail = plan.map((row) => row.detail).join(" / ");
   assert.match(detail, /deliveries_status_scheduled_at/, `フルスキャンになっている: ${detail}`);
+  assert.doesNotMatch(detail, /SCAN deliveries/, `テーブルフルスキャンが発生している: ${detail}`);
+  assert.doesNotMatch(
+    detail,
+    /TEMP B-TREE/,
+    `id のタイブレークで一時ソートが発生している（インデックスに id が含まれていない）: ${detail}`,
+  );
+});
+
+test("claim の返却順は RETURNING の順序に依存せず scheduled_at, id 順に並ぶ（挿入順とわざとずらす）", async () => {
+  const { db, queue } = createDb();
+  // 挿入順を scheduled_at 順とわざと食い違わせる（RETURNING の返却順は未定義なので、
+  // TypeScript 側の並べ替えが効いていないと挿入順や内部行順で返ってきてしまう）。
+  insertDelivery(db, { id: "d-c", scheduled_at: minutesAgo(10) });
+  insertDelivery(db, { id: "d-a", scheduled_at: minutesAgo(30) });
+  insertDelivery(db, { id: "d-d", scheduled_at: minutesAgo(5) });
+  insertDelivery(db, { id: "d-b", scheduled_at: minutesAgo(20) });
+
+  const claimed = await claimDueDeliveries(queue, NOW, DELIVERY_CLAIM_MAX_BATCH);
+
+  assert.deepEqual(
+    claimed.map((row) => row.id),
+    ["d-a", "d-b", "d-c", "d-d"],
+    "scheduled_at 昇順（同時刻は id 昇順）に整列していること",
+  );
+});
+
+test("claim の返却順は scheduled_at が同一の行を id 昇順でタイブレークする", async () => {
+  const { db, queue } = createDb();
+  const same = minutesAgo(10);
+  insertDelivery(db, { id: "d-z", scheduled_at: same });
+  insertDelivery(db, { id: "d-x", scheduled_at: same });
+  insertDelivery(db, { id: "d-y", scheduled_at: same });
+
+  const claimed = await claimDueDeliveries(queue, NOW, DELIVERY_CLAIM_MAX_BATCH);
+
+  assert.deepEqual(claimed.map((row) => row.id), ["d-x", "d-y", "d-z"]);
 });
 
 test("スタック復旧: 10分超の processing は queued に戻り、試行上限に達した行は failed で打ち止め", async () => {
@@ -198,6 +234,49 @@ test("markDeliveriesSkipped は指定した processing の行だけを skipped �
   assert.equal(getRow(db, "d1").error_message, "delivery condition not met");
   assert.equal(getRow(db, "d2").status, "processing", "指定していない行に触らない");
   assert.equal(getRow(db, "d3").status, "sent", "processing 以外の行に触らない");
+});
+
+test("markDeliveriesSkipped は D1_MAX_BIND_PARAMS（100）件ずつチャンクして UPDATE する（D1 のバインドパラメータ上限対策）", async () => {
+  // node:sqlite にはバインドパラメータ100個の上限が無いため、実 D1 相当のエラーはここでは
+  // 再現できない。代わりに QueueDb をスタブし、1回の呼び出しに渡す params が
+  // D1_MAX_BIND_PARAMS を超えないことを直接アサートする。
+  const calls: Array<readonly (string | number | null)[]> = [];
+  const stubDb: QueueDb = {
+    all: async () => [],
+    run: async (_sql, params) => {
+      calls.push(params);
+    },
+  };
+
+  const ids = Array.from({ length: 245 }, (_, i) => `d-${i}`);
+  await markDeliveriesSkipped(stubDb, ids);
+
+  assert.equal(calls.length, 3, "245件は 100+100+45 の3回に分かれること");
+  for (const params of calls) {
+    assert.ok(
+      params.length <= D1_MAX_BIND_PARAMS,
+      `1回の呼び出しの params が上限を超えている: ${params.length}`,
+    );
+  }
+  assert.deepEqual(calls.map((p) => p.length), [100, 100, 45]);
+  // 全IDが過不足なく含まれていること（順序はチャンク順で保持される）
+  assert.deepEqual(calls.flat(), ids);
+});
+
+test("markDeliveriesSkipped は101件以上でも実DBで全件 skipped になる（実SQL経路の確認）", async () => {
+  const { db, queue } = createDb();
+  const ids: string[] = [];
+  for (let i = 0; i < 120; i += 1) {
+    const id = `d-${i}`;
+    ids.push(id);
+    insertDelivery(db, { id, status: "processing", processing_started_at: minutesAgo(1) });
+  }
+
+  await markDeliveriesSkipped(queue, ids);
+
+  for (const id of ids) {
+    assert.equal(getRow(db, id).status, "skipped", `${id} が skipped になっていない`);
+  }
 });
 
 test("shouldSkipDelivery は Postgres 版の skipped 判定と同じ意味論を持つ", () => {

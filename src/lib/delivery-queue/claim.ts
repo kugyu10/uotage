@@ -32,12 +32,18 @@ export const PROCESSING_TIMEOUT_MINUTES = 10;
  * 1回の claim で取る最大件数。Postgres 版 RPC の batch_limit 上限と同じ 500。
  * 旧値の根拠（要件定義書 7.5 #4、Edge Function の実行時間制限）は Workers 移行で
  * CPU 制限が変わるため消えるが、Resend Batch API 100通×5回・D1 の1クエリ結果サイズを
- * 考えると引き上げは実測後でよい（docs/migration/p4-deliveries-d1.md 参照）。
+ * 考えると引き上げは実測後でよい（docs/移行P4-配信キューD1切り出し.md 参照）。
  */
 export const DELIVERY_CLAIM_MAX_BATCH = 500;
 
 /** error_message に格納する最大長（Edge Function の .slice(0, 500) と同じ）。 */
 export const ERROR_MESSAGE_MAX_LENGTH = 500;
+
+/**
+ * D1 は1クエリあたりのバインドパラメータを最大100個に制限している（Cloudflare D1 Limits）。
+ * `id in (?, ?, ...)` のようにID列を展開するクエリはこの上限でチャンクする必要がある。
+ */
+export const D1_MAX_BIND_PARAMS = 100;
 
 type SqlParam = string | number | null;
 
@@ -93,12 +99,27 @@ export async function recoverStuckDeliveries(db: QueueDb, now: Date): Promise<vo
 }
 
 /**
+ * claim 対象を選ぶ SELECT 文（targetDeliveryId 未指定時）。
+ * `test/unit/delivery-queue-claim.test.ts` の EXPLAIN QUERY PLAN 検証はこの定数に対して行う。
+ * `order by` はここでは「候補として選ぶ行」を決めるだけで、行の返却順は保証しない
+ * （claimDueDeliveries 側で TypeScript が返却行を並べ替える）。
+ */
+export const CLAIM_CANDIDATE_SELECT_SQL = `select id from deliveries
+       where status = 'queued' and scheduled_at <= ?
+       order by scheduled_at, id
+       limit ?`;
+
+/**
  * 期限が来た queued 行を batchLimit 件まで claim し、processing にして返す。
  *
  * 1本の UPDATE ... RETURNING で「候補の選択」と「processing 化」を同時に行う。
  * D1 の書き込みは直列なので、複数の cron 実行が重なっても同じ行を二重に claim できない
  * （Postgres で FOR UPDATE SKIP LOCKED が担っていた排他と同等）。
- * 並び順は Postgres 版と同じ scheduled_at, id。
+ *
+ * SQLite / D1 の `RETURNING` は返却行の順序を保証しない（サブクエリ内の `order by` は
+ * 「どの行を選ぶか」にしか効かない）。Postgres 版 RPC は末尾に独立した
+ * `order by delivery.scheduled_at, delivery.id` を持っていたが、その保証はこの移植では
+ * SQL 側では再現できないため、ここで TypeScript 側で明示的に scheduled_at, id 順に並べ直す。
  */
 export async function claimDueDeliveries(
   db: QueueDb,
@@ -117,7 +138,7 @@ export async function claimDueDeliveries(
       ? [claimTime, claimTime, batchLimit]
       : [claimTime, claimTime, targetDeliveryId, batchLimit];
 
-  return db.all<ClaimedDelivery>(
+  const claimed = await db.all<ClaimedDelivery>(
     `update deliveries set
        status = 'processing',
        processing_started_at = ?,
@@ -132,6 +153,14 @@ export async function claimDueDeliveries(
      returning id, tenant_id, scenario_reader_id, step_message_id, reader_id, scheduled_at, attempt_count`,
     params,
   );
+
+  return claimed.sort((a, b) => {
+    if (a.scheduled_at !== b.scheduled_at) {
+      return a.scheduled_at < b.scheduled_at ? -1 : 1;
+    }
+    if (a.id === b.id) return 0;
+    return a.id < b.id ? -1 : 1;
+  });
 }
 
 /**
@@ -166,16 +195,25 @@ export async function releaseDeliveryFailure(db: QueueDb, deliveryId: string, er
   );
 }
 
-/** 送信条件を満たさなかった行を skipped にする（Postgres 版の 'delivery condition not met' と同じ文言）。 */
+/**
+ * 送信条件を満たさなかった行を skipped にする（Postgres 版の 'delivery condition not met' と同じ文言）。
+ *
+ * D1_MAX_BIND_PARAMS（100）件ずつチャンクして複数回 UPDATE を撃つ。DELIVERY_CLAIM_MAX_BATCH（500）件を
+ * 一度に claim できるため、スキップ対象が101件以上になるケースは普通に起こりうる。チャンク化しないと
+ * D1 で「too many SQL variables」相当のエラーになり、該当行が processing のまま滞留する。
+ */
 export async function markDeliveriesSkipped(db: QueueDb, deliveryIds: readonly string[]): Promise<void> {
   if (deliveryIds.length === 0) return;
-  const placeholders = deliveryIds.map(() => "?").join(", ");
-  await db.run(
-    `update deliveries set status = 'skipped', processing_started_at = null,
-       error_message = 'delivery condition not met'
-     where status = 'processing' and id in (${placeholders})`,
-    [...deliveryIds],
-  );
+  for (let offset = 0; offset < deliveryIds.length; offset += D1_MAX_BIND_PARAMS) {
+    const chunk = deliveryIds.slice(offset, offset + D1_MAX_BIND_PARAMS);
+    const placeholders = chunk.map(() => "?").join(", ");
+    await db.run(
+      `update deliveries set status = 'skipped', processing_started_at = null,
+         error_message = 'delivery condition not met'
+       where status = 'processing' and id in (${placeholders})`,
+      [...chunk],
+    );
+  }
 }
 
 /** shouldSkipDelivery の判定材料。Worker が Supabase から引いてくる。 */

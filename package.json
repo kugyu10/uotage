@@ -2,8 +2,11 @@
   "name": "uotage",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
-    "test": "node --test --experimental-strip-types",
+    "test": "node --test --experimental-strip-types --experimental-sqlite",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
