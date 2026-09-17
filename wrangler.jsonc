@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Next.js アプリ本体（Vercelから移行）用のWorker。
+  // workers/dispatch-cron/wrangler.jsonc とは別デプロイ単位（#7 参照）。
+  // 名前の衝突は無いが、切替時は「デプロイ手順書」の順序を守ること。
+  "main": ".open-next/worker.js",
+  "name": "uotage-web",
+  "compatibility_date": "2026-09-02",
+  // nodejs_compat: @opennextjs/cloudflare が Node.js API のポリフィルに必要とする。
+  // global_fetch_strictly_public: 公式テンプレート
+  // （node_modules/@opennextjs/cloudflare/templates/wrangler.jsonc）由来。
+  // Worker発の fetch() が同じ Worker 自身（プライベートなサービスバインディング宛）に
+  // 誤って到達しないよう、グローバルの fetch() を「パブリックな宛先のみ」に制限する。
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    // Workers Logs を有効化する。手順書のデプロイ後監視
+    // （docs/cloudflare-workers-hosting.md の「並行稼働」節）が前提にしている。
+    "enabled": true
+  },
+  "images": {
+    // next/image の画像最適化に必要。無いと画像最適化が無効化され、
+    // 元画像がそのまま返る（クラッシュはしない）。
+    // https://opennext.js.org/cloudflare/howtos/image
+    "binding": "IMAGES"
+  },
+  "services": [
+    {
+      // セルフバインディング。@opennextjs/cloudflare のキャッシュ機構
+      // （fetch cache interception）が内部で使う。名前は上の "name" と一致させる。
+      // https://opennext.js.org/cloudflare/caching
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "uotage-web"
+    }
+  ]
+  // 環境変数・シークレットはここに書かない。
+  // 移行方針は docs/cloudflare-workers-hosting.md を参照。
+}
