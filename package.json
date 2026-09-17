@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "node --test --experimental-strip-types",
+    "test": "node --import ./test/support/register-next-loader.mjs --test --experimental-strip-types",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -23,7 +23,6 @@
     "deliveries:deploy": "node --env-file=.env.local scripts/deploy-delivery-worker.mjs"
   },
   "dependencies": {
-    "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.112.3",
     "next": "16.3.4",
     "react": "19.2.8",
