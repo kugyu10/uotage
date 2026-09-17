@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Cloudflare Workers（移行 #7）: 別ランタイム・別tsconfigのため、
+    // Next.js向けESLint設定の対象から外す。
+    "workers/**",
   ]),
 ]);
 

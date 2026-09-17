@@ -1,0 +1,16 @@
+{
+  "name": "uotage-dispatch-cron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Workers Cron Trigger worker: 1分ごとにSupabase Edge Function dispatch-deliveries を呼び出す（移行 #7）",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled",
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260911.1",
+    "typescript": "^5",
+    "wrangler": "^4.131.0"
+  }
+}
