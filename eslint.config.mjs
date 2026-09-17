@@ -15,6 +15,9 @@ const eslintConfig = defineConfig([
     // opennextjs-cloudflare のビルド生成物（cf:build で生成、コミット対象外）。
     ".open-next/**",
     ".wrangler/**",
+    // Cloudflare Workers（移行 #7）: 別ランタイム・別tsconfigのため、
+    // Next.js向けESLint設定の対象から外す。
+    "workers/**",
   ]),
 ]);
 

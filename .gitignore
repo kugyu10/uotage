@@ -50,5 +50,8 @@ next-env.d.ts
 # cloudflare (opennextjs-cloudflare / wrangler)
 /.open-next/
 /.wrangler/
+# cloudflare workers (workers/dispatch-cron)
+**/node_modules
+.wrangler/
 .dev.vars
 .dev.vars.*
