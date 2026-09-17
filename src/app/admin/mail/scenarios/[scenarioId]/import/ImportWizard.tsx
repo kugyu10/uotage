@@ -16,8 +16,16 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
   const boundPreviewImport = previewImport.bind(null, scenarioId);
   const [previewState, previewAction, previewPending] = useActionState(boundPreviewImport, initialPreviewState);
 
+  // React 19 は action 付き <form> の送信後に form.reset() を走らせるため、ドライラン成功後の
+  // file input は空になる。確定実行にファイルを再送する（issue #2）には DOM の input に頼れないので、
+  // onChange で受け取った File をここに保持し、確定実行の FormData へ詰め直す。
+  // input の value はプログラムから復元できないが、File ハンドル自体は state で生き残る。
+  const [file, setFile] = useState<File | null>(null);
+
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>("none");
-  const boundConfirmImport = confirmImport.bind(null, scenarioId, previewState.validRows ?? []);
+  // 確定実行はファイルそのものをサーバーで再パースする（issue #2）。クライアントへ戻すのは
+  // ドライランしたファイルのハッシュだけで、検証済み行は往復しない。
+  const boundConfirmImport = confirmImport.bind(null, scenarioId, previewState.fileHash);
   const [confirmState, confirmAction, confirmPending] = useActionState(boundConfirmImport, initialConfirmState);
 
   // 確定実行はRPCを複数回に分けて呼ぶため、途中で失敗すると「先頭から一部だけ反映済み」
@@ -60,10 +68,16 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
           <label>
             CSVファイル（UTAGE互換、日本語ヘッダー / 5MB・{MAX_IMPORT_ROWS.toLocaleString("ja-JP")}行まで）
             <br />
-            <input type="file" name="file" accept=".csv,text/csv" required />
+            <input
+              type="file"
+              name="file"
+              accept=".csv,text/csv"
+              required
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            />
           </label>
         </p>
-        <button type="submit" disabled={previewPending}>
+        <button type="submit" disabled={previewPending || confirmPending}>
           {previewPending ? "確認中…" : "ドライラン実行"}
         </button>
       </form>
@@ -97,7 +111,15 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
             </div>
           )}
 
-          <form action={confirmAction}>
+          {/* 確定実行は独立した form にする（required の制約がドライラン側と混ざらない）。
+              file input はこの form に無いため、state に保持した File を FormData へ詰め直して
+              サーバーで再パースさせる。ドライラン時と違うファイルならサーバーのハッシュ照合が弾く。 */}
+          <form
+            action={(formData) => {
+              if (file) formData.set("file", file);
+              confirmAction(formData);
+            }}
+          >
             <fieldset>
               <legend>再送防止オプション</legend>
               <p>
@@ -150,7 +172,7 @@ export function ImportWizard({ scenarioId }: { scenarioId: string }) {
 
             {confirmState.status === "error" && <p role="alert">{confirmState.error}</p>}
 
-            <button type="submit" disabled={confirmPending}>
+            <button type="submit" disabled={confirmPending || previewPending}>
               {confirmPending ? "実行中…" : "この内容で確定して実行"}
             </button>
           </form>
