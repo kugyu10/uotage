@@ -59,8 +59,11 @@ export async function updateStep(scenarioId: string, stepId: string, formData: F
 export async function sendTestStep(scenarioId: string, subject: string, body: string) {
   const { supabase, operator } = await requireOperator();
 
-  // operator.user_id は Cloudflare Access の検証済みメールアドレス（#9 で再定義）。
-  const to = operator.user_id;
+  const { data: auth } = await supabase.auth.getUser();
+  const to = auth.user?.email;
+  if (!to) {
+    throw new Error("ログイン中のメールアドレスを取得できませんでした。");
+  }
 
   const { data: scenario } = await supabase
     .from("scenarios")

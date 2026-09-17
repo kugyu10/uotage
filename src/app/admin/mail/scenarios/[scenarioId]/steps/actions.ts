@@ -11,14 +11,9 @@ import { requireOperator } from "@/lib/supabase/server";
  * 読んでから insert すると、同時追加で position が衝突する。
  */
 export async function createStep(scenarioId: string) {
-  const { supabase, operator } = await requireOperator();
+  const { supabase } = await requireOperator();
 
-  await assertScenarioOwnership(supabase, operator.tenant_id, scenarioId);
-
-  // append_step_message は security invoker で「呼び出し元の RLS がテナント越えを
-  // 弾く」前提だが、#9 で requireOperator() は service role クライアント（RLS 迂回）
-  // になったためその前提は崩れている。RPC 呼び出し前の assertScenarioOwnership で
-  // テナント境界を明示的に確認する。
+  // 関数は security invoker。他テナントのシナリオは RLS が弾く。
   const { data: newStepId, error } = await supabase.rpc("append_step_message", {
     target_scenario_id: scenarioId,
   });
@@ -53,9 +48,7 @@ export async function deleteStep(scenarioId: string, stepId: string) {
  * 間で失敗したときに position が重複したまま残る。
  */
 export async function moveStep(scenarioId: string, stepId: string, direction: "up" | "down") {
-  const { supabase, operator } = await requireOperator();
-
-  await assertScenarioOwnership(supabase, operator.tenant_id, scenarioId);
+  const { supabase } = await requireOperator();
 
   const { error } = await supabase.rpc("move_step_message", {
     target_scenario_id: scenarioId,
@@ -65,28 +58,6 @@ export async function moveStep(scenarioId: string, stepId: string, direction: "u
   if (error) throw new Error("ステップの並び替えに失敗しました。");
 
   revalidatePath(`/admin/mail/scenarios/${scenarioId}/steps`);
-}
-
-/**
- * scenarioId が呼び出し元オペレーターのテナントに属するかを検証する。
- * append_step_message / move_step_message は security invoker で RLS に
- * テナント境界を委ねているが、requireOperator() は service role クライアント
- * （RLS 迂回）を返すため、RPC を呼ぶ前にここで明示的に検証する必要がある。
- */
-async function assertScenarioOwnership(
-  supabase: Awaited<ReturnType<typeof requireOperator>>["supabase"],
-  tenantId: string,
-  scenarioId: string,
-) {
-  const { data: scenario } = await supabase
-    .from("scenarios")
-    .select("id")
-    .eq("tenant_id", tenantId)
-    .eq("id", scenarioId)
-    .maybeSingle();
-  if (!scenario) {
-    throw new Error("シナリオが見つかりません。");
-  }
 }
 
 async function renumberSteps(

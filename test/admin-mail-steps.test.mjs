@@ -140,9 +140,7 @@ test('test send is implemented but requires an explicit button click, and prefix
   assert.match(stepEditActions, /\[テスト\] /);
   assert.match(stepEditActions, /renderStepTemplate\(subject, STEP_PREVIEW_SAMPLE_VALUES\)/);
   assert.match(stepEditActions, /renderStepTemplate\(body, STEP_PREVIEW_SAMPLE_VALUES\)/);
-  // #9: テスト送信先は Supabase Auth のセッションではなく、Cloudflare Access で
-  // 検証済みの operator.user_id（email）を使う。
-  assert.match(stepEditActions, /const to = operator\.user_id;/);
+  assert.match(stepEditActions, /auth\.user\?\.email/);
   // useEffect-driven auto-invocation would send mail without an explicit user action; make sure there is none.
   assert.doesNotMatch(stepEditor, /useEffect/);
 });
