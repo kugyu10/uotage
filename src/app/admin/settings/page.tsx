@@ -1,6 +1,6 @@
 import { requireOperator } from "@/lib/supabase/server";
 
-import { updateDeliveryAccount } from "./actions";
+import { updateDeliveryAccount } from "./actions.ts";
 
 export const dynamic = "force-dynamic";
 

@@ -1,9 +1,9 @@
-// このディレクトリの相対importは拡張子(.ts)を明記している。
-// リポジトリの他の場所は拡張子なしだが、ここだけは
-// `node --test --experimental-strip-types` からテストが直接importするため。
-// 型ストリッピングはバンドラのような拡張子補完を行わず、拡張子なしでは
-// ERR_MODULE_NOT_FOUND になる（tsconfig の allowImportingTsExtensions で型検査は通る）。
-// 規約をリポジトリ全体へ広げるかは未決（issue #4）。
+// 相対importは拡張子(.ts/.tsx)を明記する（リポジトリ全体の規約。issue #4 で決定）。
+// 目的は規約の単一化（「どこを触っているかで書き方が変わる」状態の解消）。
+// `.ts` の拡張子明記は `node --test --experimental-strip-types` からの直接importにも
+// 寄与するが、`.tsx` は node の型ストリッピング対象外なので寄与しない（表記統一のみ）。
+// （tsconfig の allowImportingTsExtensions で型検査・ビルドは通る）。
+// 規約は test/import-extension-convention.test.mjs が機械的に強制する。
 import { buildCsv, sanitizeCsvCell, UTF8_BOM } from "./format.ts";
 import { CSV_HEADERS } from "./columns.ts";
 import { formatJstDateTime } from "./timezone.ts";
