@@ -1,52 +1,27 @@
+import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
-import type { RemoteJWKSetOptions } from "jose";
 
-import {
-  ACCESS_EMAIL_HEADER,
-  ACCESS_JWT_COOKIE,
-  ACCESS_JWT_HEADER,
-  verifyAccessJwt,
-} from "@/lib/cloudflare-access";
-
-/**
- * テスト専用の依存差し込み口。
- * 本番の呼び出し（Next.js Edge Middleware）は第2引数を渡さず、
- * 常に process.env を見る。test/unit/proxy.test.ts はここへ
- * teamDomain/audience/jwksOptions を明示的に渡し、ネットワーク無しで
- * proxy() の振る舞いそのもの（認可バイパスが無いこと）を実行して確認する。
- */
-export interface ProxyDeps {
-  teamDomain?: string;
-  audience?: string;
-  jwksOptions?: RemoteJWKSetOptions;
-}
-
-// Cloudflare Access（Zero Trust）が /admin/* の手前で認証を行う。
-// ここでは Access が付けた JWT を検証し、含まれるメールアドレスを
-// 下流（requireOperator）が信頼できる内部ヘッダーへ積み直すだけを行う。
-export async function proxy(request: NextRequest, deps: ProxyDeps = {}) {
-  const teamDomain = (deps.teamDomain ?? process.env.CF_ACCESS_TEAM_DOMAIN)?.replace(/\/+$/, "");
-  const audience = deps.audience ?? process.env.CF_ACCESS_AUD;
-  if (!teamDomain || !audience) {
-    // Cloudflare Access が未設定。ログイン画面は撤去済みで代替経路が無いため、
-    // 誤って管理画面を無認証公開しないよう一律で拒否する。
-    return new NextResponse("Cloudflare Access が未設定です。管理者に連絡してください。", { status: 503 });
+export async function proxy(request: NextRequest) {
+  let response = NextResponse.next({ request });
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !key) return NextResponse.redirect(new URL("/login?setup=required", request.url));
+  const supabase = createServerClient(url, key, { cookies: {
+    getAll: () => request.cookies.getAll(),
+    setAll: (values) => {
+      values.forEach(({ name, value }) => request.cookies.set(name, value));
+      response = NextResponse.next({ request });
+      values.forEach(({ name, value, options }) => response.cookies.set(name, value, options));
+    },
+  } });
+  const { data } = await supabase.auth.getClaims();
+  if (!data?.claims) {
+    // 認証後の遷移先は /auth/callback が常に /admin へ固定する。
+    // 元のパスへ戻す機能は、オープンリダイレクトを避けるため
+    // 許可リスト方式で実装するまで持たない。
+    return NextResponse.redirect(new URL("/login", request.url));
   }
-
-  const token = request.headers.get(ACCESS_JWT_HEADER) ?? request.cookies.get(ACCESS_JWT_COOKIE)?.value;
-  if (!token) {
-    return new NextResponse("認証が必要です。", { status: 403 });
-  }
-
-  try {
-    const { email } = await verifyAccessJwt(token, { teamDomain, audience, jwksOptions: deps.jwksOptions });
-    // クライアントが同名ヘッダーを送っていても、検証済みの値で必ず上書きする。
-    const requestHeaders = new Headers(request.headers);
-    requestHeaders.set(ACCESS_EMAIL_HEADER, email);
-    return NextResponse.next({ request: { headers: requestHeaders } });
-  } catch {
-    return new NextResponse("認証に失敗しました。", { status: 403 });
-  }
+  return response;
 }
 
 export const config = { matcher: ["/admin/:path*"] };

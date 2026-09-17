@@ -6,6 +6,7 @@ const read = (path) => readFile(new URL(path, import.meta.url), 'utf8');
 
 const unsubscribeRoute = await read('../src/app/api/unsubscribe/route.ts');
 const webhook = await read('../src/app/api/stripe/webhook/route.ts');
+const loginForm = await read('../src/app/login/login-form.tsx');
 const labelActions = await read('../src/app/admin/labels/actions.ts');
 const nextConfig = await read('../next.config.ts');
 const edge = await read('../supabase/functions/dispatch-deliveries/index.ts');
@@ -37,6 +38,12 @@ test('the webhook returns 2xx for events that a retry cannot fix', () => {
   assert.match(webhook, /return new Response\("購入処理に失敗しました。", \{ status: 500 \}\)/);
 });
 
+test('login does not create auth users for uninvited addresses', () => {
+  assert.match(loginForm, /shouldCreateUser: false/);
+  // 成否で文言を出し分けるとアドレスの登録有無が判定できてしまう。
+  assert.doesNotMatch(loginForm, /error \?/);
+});
+
 test('label names cannot contain the CSV list separator', () => {
   // 「ラベル」列はカンマ区切りなので、名前にカンマがあると往復で分裂する。
   assert.match(labelActions, /name\.includes\(","\)/);
@@ -66,8 +73,8 @@ test('the cron secret is compared in constant time', () => {
 });
 
 test('the proxy does not build a redirect target from the request path', () => {
-  // #9: Cloudflare Access 移行後、proxy はリダイレクトを一切発行しない
-  // （未認証は 403/503 を返すのみ）。request.url からの組み立ても無い。
+  // next パラメータはどこも参照しておらず、許可リストなしでは
+  // オープンリダイレクトの入口になりうる。
   assert.doesNotMatch(proxy, /searchParams\.set\("next"/);
-  assert.doesNotMatch(proxy, /NextResponse\.redirect/);
+  assert.match(proxy, /NextResponse\.redirect\(new URL\("\/login", request\.url\)\)/);
 });

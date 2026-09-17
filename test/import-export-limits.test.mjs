@@ -203,24 +203,16 @@ test('マイグレーションのバージョン（先頭14桁）が重複して
   }
 });
 
-test('行数ガードの migration は、それ以前に存在していた migration より後のバージョンになっている', async () => {
-  // #9 での修正: 「その時点の最新」を動的に見て比較すると、後から別件の migration が
-  // 増えるたびにこのテストが壊れる（このテスト自身は行数ガード導入時の順序退行の
-  // 回帰確認であり、以降に追加される無関係な migration の存在に依存すべきではない）。
-  // そのため比較対象は「行数ガード migration より前のバージョン番号を持つもの」に固定する。
+test('行数ガードの migration は既存の最新より後のバージョンになっている', async () => {
   const files = (await readdir(new URL('../supabase/migrations/', import.meta.url))).filter((name) =>
     name.endsWith('.sql'),
   );
   const target = files.find((name) => name.includes('import_batch_row_limit'));
   assert.ok(target, 'import_batch_row_limit の migration が見つからない');
-  const targetVersion = target.slice(0, 14);
-  const priorOthers = files
-    .filter((name) => name !== target)
-    .map((name) => name.slice(0, 14))
-    .filter((version) => version < targetVersion);
-  const latestPrior = priorOthers.sort().at(-1);
+  const others = files.filter((name) => name !== target).map((name) => name.slice(0, 14));
+  const latestOther = others.sort().at(-1);
   assert.ok(
-    targetVersion > latestPrior,
-    `${target} が導入当時の最新(${latestPrior})より前に適用される`,
+    target.slice(0, 14) > latestOther,
+    `${target} が既存の最新(${latestOther})より前に適用される`,
   );
 });
