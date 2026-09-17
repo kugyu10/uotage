@@ -31,5 +31,6 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules", "supabase/functions"]
+  "exclude": ["node_modules", "supabase/functions", ".open-next", ".wrangler"]
+  "exclude": ["node_modules", "supabase/functions", "workers"]
 }
