@@ -2,6 +2,9 @@
   "name": "uotage",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "test": "node --import ./test/support/register-next-loader.mjs --test --experimental-strip-types",
     "dev": "next dev",
