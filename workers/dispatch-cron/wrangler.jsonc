@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "uotage-dispatch-cron",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "observability": {
+    "enabled": true
+  }
+  // SUPABASE_PROJECT_URL と CRON_SECRET は Workers Secrets で設定する。
+  // ここ（vars）には書かない。設定手順は README.md を参照。
+}
