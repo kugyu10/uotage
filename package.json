@@ -6,7 +6,7 @@
     "node": "22.x"
   },
   "scripts": {
-    "test": "node --import ./test/support/register-next-loader.mjs --test --experimental-strip-types",
+    "test": "node --import ./test/support/register-next-loader.mjs --test --experimental-strip-types --experimental-sqlite",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
