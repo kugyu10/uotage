@@ -111,6 +111,12 @@ test('confirmImport は検証済み行を受け取らず、ファイルを再パ
   assert.match(confirmFn, /readConfirmedImportFile\(formData, expectedFileHash\)/);
   assert.match(confirmFn, /parseImportCsv\(text\)/);
   assert.match(confirmFn, /checkImportRowLimit\(parsed\.rows\.length, parsed\.invalidRows\.length\)/);
+  // 再パース結果は「全行」を取り込む。slice やページングが混ざると
+  // 「5,000行のつもりが一部しか入らない」という静かなデータ欠落になる（レビュー指摘 🟢1）。
+  assert.match(confirmFn, /const rowsPayload = parsed\.rows\.map\(/);
+  // ハッシュ一致＝ドライランと同一テキストなので実質到達しないが、0行で RPC を叩かない
+  // 防御的ガードを残しておく（レビュー指摘 🟢2）。
+  assert.match(confirmFn, /if \(parsed\.rows\.length === 0\)/);
   // 検証済み行の配列をクライアント経由で受ける実装（RSCペイロード往復）に戻っていないこと。
   // （\b が無いと invalidRows に部分一致してしまう）
   // 対象はファイル全体ではなく「往復が起きうる箇所」に絞る。無関係な文脈で validRows という
@@ -130,6 +136,9 @@ test('確定実行はドライラン済みファイルとの同一性をハッ�
   // ドライランがハッシュを発行し、確定実行は readConfirmedImportFile がパースより先に照合する
   // （照合そのものの挙動は test/unit/csv-import-file.test.ts が実物を呼んで固定している）。
   assert.match(previewFn, /fileHash: hashImportCsvBytes\(bytes\)/);
+  // デコードは preview / confirm とも decodeImportCsv の1本だけ。片方が file.text() などに
+  // 戻ると「ハッシュは一致するのにパース結果が違う」壊れ方をする（レビュー指摘 🟢3）。
+  assert.match(previewFn, /const text = decodeImportCsv\(bytes\)/);
   assert.match(confirmFn, /readConfirmedImportFile\(formData, expectedFileHash\)/);
   assert.match(confirmFn, /if \(!confirmedFile\.ok\)/);
   // ウィザードが bind で戻すのはハッシュだけ（bind 引数は暗号化されるため改竄できない）。
@@ -142,6 +151,14 @@ test('確定実行はドライラン済みファイルとの同一性をハッ�
   assert.match(importWizard, /confirmAction\(formData\)/);
   const fileInputs = importWizard.match(/type="file"/g) ?? [];
   assert.equal(fileInputs.length, 1, 'file input が複数あると再送されるファイルが曖昧になる');
+});
+
+test('ファイルサイズ上限の文言は定数と同じ場所に1つだけ置く (issue #2 レビュー 🟢4)', () => {
+  // 上限値 (MAX_IMPORT_FILE_SIZE_BYTES) と「5MB以下にしてください」という文言が
+  // 別ファイルに分かれると、片方だけ変えたときに嘘の案内になる。
+  // preview / confirm とも import-file.ts の共有定数を使い、actions.ts には直書きしない。
+  assert.match(previewFn, /error: IMPORT_FILE_TOO_LARGE_ERROR/);
+  assert.doesNotMatch(importActions, /"ファイルサイズが大きすぎます/);
 });
 
 test('UIは部分適用を専用の文言で伝え、再実行が安全であることを案内する', () => {
