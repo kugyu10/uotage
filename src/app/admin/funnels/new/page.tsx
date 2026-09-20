@@ -1,7 +1,7 @@
 import { requireOperator } from "@/lib/supabase/server";
 
-import { createFunnel } from "../actions";
-import { FunnelForm } from "../FunnelForm";
+import { createFunnel } from "../actions.ts";
+import { FunnelForm } from "../FunnelForm.tsx";
 
 export const dynamic = "force-dynamic";
 

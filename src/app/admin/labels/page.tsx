@@ -1,6 +1,6 @@
 import { requireOperator } from "@/lib/supabase/server";
 
-import { createLabel, deleteLabel, renameLabel } from "./actions";
+import { createLabel, deleteLabel, renameLabel } from "./actions.ts";
 
 export const dynamic = "force-dynamic";
 
