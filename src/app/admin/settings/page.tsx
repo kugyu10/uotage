@@ -1,6 +1,6 @@
 import { requireOperator } from "@/lib/supabase/server";
 
-import { updateDeliveryAccount } from "./actions";
+import { updateDeliveryAccount } from "./actions.ts";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +15,6 @@ function stripeMode(secretKey: string | undefined): "test" | "live" | "unknown" 
 
 export default async function SettingsPage() {
   const { supabase, operator } = await requireOperator();
-  const { data: auth } = await supabase.auth.getUser();
 
   const [{ data: operators }, { data: deliveryAccount }] = await Promise.all([
     supabase.from("operators").select("id,user_id,role").eq("tenant_id", operator.tenant_id).order("role", { ascending: true }),
@@ -43,7 +42,7 @@ export default async function SettingsPage() {
           <tbody>
             {(operators ?? []).map((item) => (
               <tr key={item.id}>
-                <td>{item.user_id === auth.user?.id ? auth.user?.email ?? item.user_id : item.user_id}</td>
+                <td>{item.user_id}</td>
                 <td>{ROLE_LABEL[item.role] ?? item.role}</td>
               </tr>
             ))}

@@ -2,8 +2,8 @@ import { notFound } from "next/navigation";
 
 import { requireOperator } from "@/lib/supabase/server";
 
-import { updateProduct } from "../actions";
-import { ProductForm } from "../ProductForm";
+import { updateProduct } from "../actions.ts";
+import { ProductForm } from "../ProductForm.tsx";
 
 export const dynamic = "force-dynamic";
 

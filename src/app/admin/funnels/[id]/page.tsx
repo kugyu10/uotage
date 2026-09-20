@@ -2,8 +2,8 @@ import { notFound } from "next/navigation";
 
 import { requireOperator } from "@/lib/supabase/server";
 
-import { updateFunnel } from "../actions";
-import { FunnelForm } from "../FunnelForm";
+import { updateFunnel } from "../actions.ts";
+import { FunnelForm } from "../FunnelForm.tsx";
 
 export const dynamic = "force-dynamic";
 
