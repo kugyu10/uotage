@@ -143,20 +143,99 @@ test('エクスポートは上限超過時に不完全なCSVを返さず 413 に
   assert.match(exportRoute, /status: 413/);
 });
 
+/**
+ * ソース中の `name(...)` / `name<...>(...)` 呼び出しを括弧の対応で切り出し、
+ * 呼び出しごとのトップレベル引数（文字列）の配列を返す。
+ *
+ * `/^\s*foo,$/m` のような行単位の正規表現だと「引数が1行1個」の整形に依存し、
+ * 引数を1行に畳んだだけでコードが正しくてもテストが落ちる。ここは括弧の対応を数えるので
+ * 改行位置に依存しない。文字列リテラル内のカンマ（`.select("id, email")`）も無視する。
+ */
+function callArguments(source, name) {
+  const calls = [];
+  const needle = new RegExp(`\\b${name}\\b`, 'g');
+  let match;
+  while ((match = needle.exec(source)) !== null) {
+    // import 文や日本語コメント中の同名は拾わない。呼び出しなら直後は `<`（型引数）か `(`。
+    const rest = source.slice(match.index + name.length);
+    if (!/^\s*[<(]/.test(rest)) continue;
+    // 型引数 `<...>` にはカッコが出てこないので、呼び出し名の後の最初の `(` が引数リストの開き。
+    const open = source.indexOf('(', match.index);
+    if (open < 0) break;
+    const args = [];
+    let depth = 0;
+    let current = '';
+    let quote = '';
+    for (let i = open; i < source.length; i += 1) {
+      const char = source[i];
+      if (quote) {
+        current += char;
+        if (char === '\\') {
+          current += source[i + 1] ?? '';
+          i += 1;
+        } else if (char === quote) {
+          quote = '';
+        }
+        continue;
+      }
+      if (char === '"' || char === "'" || char === '`') {
+        quote = char;
+        current += char;
+        continue;
+      }
+      if (char === '(' || char === '[' || char === '{') {
+        depth += 1;
+        if (depth === 1) continue; // 引数リストの開きカッコ自体は本文に含めない
+      } else if (char === ')' || char === ']' || char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          if (current.trim()) args.push(current.trim());
+          break;
+        }
+      } else if (char === ',' && depth === 1) {
+        args.push(current.trim());
+        current = '';
+        continue;
+      }
+      current += char;
+    }
+    calls.push(args);
+  }
+  return calls;
+}
+
 test('エクスポートは fetchInChunks の並列度を 1 に固定し、同時リクエストを倍増させない', () => {
   // issue #6 で fetchInChunks 内が並列化された。エクスポートは Promise.all で
   // fetchInChunks を3本同時に走らせているので、既定の並列度のままだと同時リクエストが
   // 3 × SUPABASE_CHUNK_CONCURRENCY へ倍増し、共有コネクションプールを想定外に食う。
   // レイテンシ改善の対象は取り込みのドライラン側なので、ここは従来どおり「同時3本」に固定する。
   assert.match(exportRoute, /const exportChunkConcurrency = 1;/);
-  const chunkCalls = exportRoute.match(/fetchInChunks</g) ?? [];
-  const pinned = exportRoute.match(/^\s*exportChunkConcurrency,$/gm) ?? [];
-  assert.ok(chunkCalls.length > 0, 'エクスポートが fetchInChunks を使わなくなっている');
-  assert.equal(
-    pinned.length,
-    chunkCalls.length,
-    `fetchInChunks ${chunkCalls.length}本のうち ${pinned.length}本にしか並列度が渡っていない`,
-  );
+  const calls = callArguments(exportRoute, 'fetchInChunks');
+  assert.ok(calls.length > 0, 'エクスポートが fetchInChunks を使わなくなっている');
+  for (const args of calls) {
+    // (keys, fetchChunkPage, chunkSize, pageSize, maxRows, concurrency) の6引数。
+    assert.equal(args.length, 6, `fetchInChunks の引数が6つでない: ${args.length}個`);
+    assert.equal(
+      args[5],
+      'exportChunkConcurrency',
+      `並列度を渡していない fetchInChunks がある（第6引数: ${args[5]}）`,
+    );
+  }
+});
+
+test('取り込みのドライランは fetchInChunks の並列度を明示せず、既定値に乗る', () => {
+  // issue #6 の本題は previewImport のレイテンシ。ここで並列度を明示してしまうと、
+  // SUPABASE_CHUNK_CONCURRENCY を調整しても取り込み側に効かなくなる（＝直列に戻せてしまう）。
+  // エクスポート側だけ配線テストがある非対称を解消する。
+  const calls = callArguments(previewFn, 'fetchInChunks');
+  assert.equal(calls.length, 2, 'ドライランの fetchInChunks は readers と scenario_readers の2本');
+  for (const args of calls) {
+    assert.equal(
+      args.length,
+      2,
+      `ドライランの fetchInChunks が並列度などを明示している（引数${args.length}個）: ${args.slice(2).join(' / ')}`,
+    );
+  }
 });
 
 test('エクスポートは tenant_id スコープと CSV ヘッダーを維持している', () => {

@@ -262,6 +262,33 @@ test("SUPABASE_CHUNK_CONCURRENCY はコネクションを食い潰さない範�
   );
 });
 
+test("fetchInChunks は concurrency を省略したら SUPABASE_CHUNK_CONCURRENCY 本で走る（既定値の配線）", async () => {
+  // 本番の previewImport は concurrency を渡さず既定値に乗る。他の並列テストはすべて
+  // 第6引数を明示しているため、既定値を 1（issue #6 以前の直列）や 500（事実上の無制限）に
+  // 書き換えても誰も気付けない状態だった。ここで既定値の配線そのものを固定する。
+  // 定数の値域テスト（2〜4）は定数を見ているだけで、それが既定値として使われていることは見ていない。
+  const keys = Array.from({ length: 9 }, (_unused, index) => `k${index}`);
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  const fetchChunkPage = async () => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await nextMacrotask();
+    inFlight -= 1;
+    return { data: [1], error: null };
+  };
+
+  // chunkSize=1 で9チャンク。既定値より多いので、既定値を上げても下げても差が出る。
+  await fetchInChunks<string, number>(keys, fetchChunkPage, 1, 10, 1000);
+
+  assert.equal(
+    maxInFlight,
+    SUPABASE_CHUNK_CONCURRENCY,
+    `concurrency 省略時の同時実行数が SUPABASE_CHUNK_CONCURRENCY(${SUPABASE_CHUNK_CONCURRENCY}) と違う`,
+  );
+});
+
 test("fetchInChunks はチャンクを concurrency 件までしか同時に実行しない", async () => {
   const keys = Array.from({ length: 9 }, (_unused, index) => `k${index}`);
   let inFlight = 0;
