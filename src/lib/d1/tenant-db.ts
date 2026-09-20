@@ -15,8 +15,11 @@
  *   - update で `set` 句が tenant_id を再代入しようとしている場合は常に拒否する
  *     （テナント間で行を付け替える正当な用途は無い）。行値代入 `set (a, b) = (?, ?)` も含む。
  *   - 静的に安全と判定できない形は最初から受理しない（issue #25 🟡G）:
- *     CTE 前置の書き込み（`with ... ) insert into ...`）と、競合行を暗黙に DELETE する
+ *     CTE 前置の書き込み（`with ... ) insert into ...` / `... update ...` /
+ *     `... delete from ...` の3系統すべて）と、競合行を暗黙に DELETE する
  *     `insert or replace` / `replace into`。呼び出し側に素直な形で書き直させる。
+ *     CTE 前置の update / delete は、マーカーが CTE 側にだけあれば本体が無絞りでも
+ *     通ってしまう形で、insert 系より実害が大きい（issue #25 レビュー 🟡-2）。
  *   - `:tenant` の値は呼び出し側が渡すのではなく、createTenantDb(executor, tenantId) が
  *     束縛した tenantId が必ず入る。呼び出し側は自分以外のテナントIDをバインドできない。
  *   - マーカー・テーブル名の検査は文字列リテラルやコメントの中身を見ない
@@ -217,18 +220,27 @@ function extractParenGroups(s: string): string[] {
 
 /**
  * insert の全変種（`insert into` / `insert or rollback|abort|fail|ignore|replace into` /
- * `replace into`）の「先頭〜列リストの開きかっこ」にマッチするパターン片。
+ * `replace into`）の**キーワード部分だけ**にマッチするパターン片（テーブル名の手前まで）。
+ *
+ * insert 変種の列挙は、このリポジトリで**ここ1箇所だけ**にする。列挙が複数あると
+ * 片方だけ広げたときに同じ穴が再発する（実際、初版は CTE_PREFIXED_WRITE_RE が
+ * 独自の列挙を持っていて、そちらだけ縮めてもテストが落ちなかった: issue #25 レビュー 🟡-1）。
+ *
+ * 正規表現リテラルだと識別子引用符のバックティックが読みにくいため文字列で組む。
+ */
+const INSERT_HEAD_KEYWORDS_SOURCE =
+  "(?:insert(?:\\s+or\\s+(?:rollback|abort|fail|ignore|replace))?|replace)\\s+into";
+
+/**
+ * insert 変種の「先頭〜列リストの開きかっこ」にマッチするパターン片。
  *
  * 入口判定（hasTenantGuard）と列リスト切り出し（parseInsertColumnsAndValues /
  * insertSelectColumnPositionOk）で**同じ**パターンを使う。旧実装はこの3箇所がそれぞれ
  * `insert\s+into` 決め打ちで、`insert or ignore into` 等が入口判定に入らず列位置検査を
  * 丸ごとスキップしていた（issue #25 🟡G）。片方だけ広げると同じ穴が再発するため、
  * 定義は1箇所に集約する。
- *
- * 正規表現リテラルだと識別子引用符のバックティックが読みにくいため文字列で組む。
  */
-const INSERT_HEAD_SOURCE =
-  '(?:insert(?:\\s+or\\s+(?:rollback|abort|fail|ignore|replace))?|replace)\\s+into\\s+[\\w."`[\\]]+\\s*\\(';
+const INSERT_HEAD_SOURCE = `${INSERT_HEAD_KEYWORDS_SOURCE}\\s+[\\w."\`[\\]]+\\s*\\(`;
 
 /** 文全体が insert 変種で始まっているか（入口判定）。 */
 const INSERT_STATEMENT_RE = new RegExp(`^\\s*${INSERT_HEAD_SOURCE}`, "i");
@@ -242,11 +254,21 @@ const INSERT_STATEMENT_RE = new RegExp(`^\\s*${INSERT_HEAD_SOURCE}`, "i");
 const DESTRUCTIVE_REPLACE_RE = /^\s*(?:insert\s+or\s+replace|replace)\s+into\b/i;
 
 /**
- * CTE 前置の書き込み文（`with ... ) insert into ...`）。列リストの手前に任意の select が
- * 挟まるため静的に安全と判定できない。`select *` や `union` と同様に拒否して
- * 呼び出し側に書き直させる（issue #25 🟡G）。
+ * CTE 前置の書き込み文（`with ... ) insert into ...` / `... update ...` / `... delete from ...`）。
+ * 列リストや set 句の手前に任意の select が挟まるため静的に安全と判定できない。
+ * `select *` や `union` と同様に拒否して呼び出し側に書き直させる（issue #25 🟡G）。
+ *
+ * update / delete も対象に含める（issue #25 レビュー 🟡-2）。`hasEqMarker` は
+ * 「文中のどこかにマーカーがあればよい」しか見ないため、マーカーが CTE 側にだけあれば
+ * 本体の update / delete が完全に無絞りでも通ってしまい、全テナントの行が消える・
+ * 書き換わる。insert 系より実害が大きい。
+ *
+ * insert 変種の列挙は INSERT_HEAD_KEYWORDS_SOURCE を参照する（列挙を2本持たない）。
  */
-const CTE_PREFIXED_WRITE_RE = /^\s*with\b[\s\S]*\b(?:insert(?:\s+or\s+\w+)?|replace)\s+into\b/i;
+const CTE_PREFIXED_WRITE_RE = new RegExp(
+  `^\\s*with\\b[\\s\\S]*\\b(?:${INSERT_HEAD_KEYWORDS_SOURCE}|update|delete\\s+from)\\b`,
+  "i",
+);
 
 /**
  * insert into <table> (<cols>) values (<vals>), (<vals>), ... の列リストと、

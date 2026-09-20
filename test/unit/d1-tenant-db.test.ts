@@ -259,7 +259,7 @@ test("issue #25 🟡G-1: insert or ignore も列位置検査の対象（位置�
   ]);
 });
 
-test("issue #25 🟡G-2: replace into / insert or replace は列位置が正しくても拒否される", async () => {
+test("issue #25 🟡G-2: replace into / insert or replace は位置ずれも正位置も拒否される", async () => {
   const { db, executor } = createExecutor();
   const tenantA = createTenantDb(executor, "tenant-a");
 
@@ -310,7 +310,69 @@ test("issue #25 🟡G-3: CTE 前置の insert は静的判定できないため�
       ),
     MissingTenantScopeError,
   );
+
+  // 素の insert だけでなく insert 変種・replace も同じく拒否する。
+  // ここを固定しないと、CTE 判定が持つ insert 変種の列挙が縮んでも誰も気付かない
+  // （issue #25 レビュー 🟡-1: 初版のテストはこの2形を流しておらず空振りしていた）。
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "with s as (select id, email from readers where tenant_id = :tenant) " +
+          "insert or ignore into labels (tenant_id, id, name) select ?, id, email from s",
+        ["evil-tenant"],
+      ),
+    MissingTenantScopeError,
+  );
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "with s as (select id, email from readers where tenant_id = :tenant) " +
+          "replace into labels (tenant_id, id, name) select ?, id, email from s",
+        ["evil-tenant"],
+      ),
+    MissingTenantScopeError,
+  );
   assert.deepEqual(db.prepare("select id from labels").all(), [], "拒否された CTE insert で行が作られていない");
+});
+
+test("issue #25 レビュー 🟡-2: CTE 前置の update / delete も拒否される（マーカーが CTE 側にだけある形）", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+  db.prepare("insert into labels (id, tenant_id, name) values (?, ?, ?)").run("l1", "tenant-a", "A");
+  db.prepare("insert into labels (id, tenant_id, name) values (?, ?, ?)").run("l2", "tenant-b", "B");
+
+  // tenant_id = :tenant のマーカーは CTE 側にしか無く、本体の delete / update は無絞り。
+  // 通してしまうと全テナントの labels が消える / 書き換わる。
+  await assert.rejects(
+    () =>
+      tenantA.run("with s as (select id from readers where tenant_id = :tenant) delete from labels"),
+    MissingTenantScopeError,
+  );
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "with s as (select id from readers where tenant_id = :tenant) update labels set name = ?",
+        ["pwned"],
+      ),
+    MissingTenantScopeError,
+  );
+  const rows = (
+    db.prepare("select id, tenant_id, name from labels order by id").all() as Array<Record<string, unknown>>
+  ).map((row) => ({ ...row }));
+  assert.deepEqual(
+    rows,
+    [
+      { id: "l1", tenant_id: "tenant-a", name: "A" },
+      { id: "l2", tenant_id: "tenant-b", name: "B" },
+    ],
+    "拒否された CTE update / delete で行が消えても書き換わってもいない",
+  );
+
+  // 過剰拒否になっていないこと: CTE 前置でも読み取り (select) は通る。
+  const read = await tenantA.all<{ id: string }>(
+    "with s as (select id from readers where tenant_id = :tenant) select id from s order by id",
+  );
+  assert.deepEqual(read, [{ id: "r1" }]);
 });
 
 test("issue #25 🟢H: 行値代入 set (tenant_id, ...) = (...) も付け替え拒否される", async () => {
