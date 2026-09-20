@@ -143,6 +143,22 @@ test('エクスポートは上限超過時に不完全なCSVを返さず 413 に
   assert.match(exportRoute, /status: 413/);
 });
 
+test('エクスポートは fetchInChunks の並列度を 1 に固定し、同時リクエストを倍増させない', () => {
+  // issue #6 で fetchInChunks 内が並列化された。エクスポートは Promise.all で
+  // fetchInChunks を3本同時に走らせているので、既定の並列度のままだと同時リクエストが
+  // 3 × SUPABASE_CHUNK_CONCURRENCY へ倍増し、共有コネクションプールを想定外に食う。
+  // レイテンシ改善の対象は取り込みのドライラン側なので、ここは従来どおり「同時3本」に固定する。
+  assert.match(exportRoute, /const exportChunkConcurrency = 1;/);
+  const chunkCalls = exportRoute.match(/fetchInChunks</g) ?? [];
+  const pinned = exportRoute.match(/^\s*exportChunkConcurrency,$/gm) ?? [];
+  assert.ok(chunkCalls.length > 0, 'エクスポートが fetchInChunks を使わなくなっている');
+  assert.equal(
+    pinned.length,
+    chunkCalls.length,
+    `fetchInChunks ${chunkCalls.length}本のうち ${pinned.length}本にしか並列度が渡っていない`,
+  );
+});
+
 test('エクスポートは tenant_id スコープと CSV ヘッダーを維持している', () => {
   assert.match(exportRoute, /requireOperator/);
   assert.match(exportRoute, /buildScenarioExportCsv/);

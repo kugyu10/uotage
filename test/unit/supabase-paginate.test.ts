@@ -12,9 +12,18 @@ import {
   TOO_MANY_ROWS,
 } from "../../src/lib/supabase/paginate.ts";
 
-/** マイクロタスクを1回挟むだけの遅延。setTimeout より速く、実行順序の検証に十分。 */
-function microtaskDelay(): Promise<void> {
-  return Promise.resolve().then(() => Promise.resolve());
+/**
+ * マクロタスクを1回挟む遅延。
+ *
+ * マイクロタスクを固定回数まわす書き方（`for (i < 10) await microtaskDelay()`）は
+ * 「実装側の await が何段あるか」に依存し、実装に await が1つ増えただけで
+ * 「まだ何も起きていない状態」を見て誤って通る。setTimeout は保留中のマイクロタスクを
+ * すべて流し切ってから戻るので、実装の await 段数から切り離せる。
+ */
+function nextMacrotask(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 /** rows を `.range(from, to)` と同じ意味で切り出す偽のページ取得関数。呼び出し範囲も記録する。 */
@@ -205,17 +214,22 @@ test("fetchInChunks はチャンク内がページサイズを超えてもペー
   assert.deepEqual(rows.map((row) => row.value), [1, 2, 3, 4, 5, 6]);
 });
 
-test("fetchInChunks はチャンクのエラーを部分結果に化けさせず throw する", async () => {
+test("fetchInChunks はチャンクのエラーを部分結果に化けさせず throw し、残りのチャンクを引かない", async () => {
+  // 並列化前はキー4件(=2チャンク)で `calls === 2` を見ていたが、それは「全チャンクを引いた」
+  // という意味にしかならず打ち切りを検証できていなかった。チャンク数を並列度より多くし、
+  // かつ concurrency=1 を明示して、直列時の「失敗したら以降を引かない」を固定する
+  // （並列時の新規着手停止は後段の専用テストが担当する）。
   let calls = 0;
   await assert.rejects(
     () =>
-      fetchInChunks<string, number>(["a", "b", "c", "d"], (chunk) => {
+      fetchInChunks<string, number>(["a", "b", "c", "d", "e", "f"], (chunk) => {
         calls += 1;
         if (chunk.includes("a")) return Promise.resolve({ data: [1, 2], error: null });
         return Promise.resolve({ data: null, error: { message: "414 too long" } });
-      }, 2, 10),
+      }, 2, 10, 50_000, 1),
     /414 too long/,
   );
+  // 3チャンク中、成功した1本目と失敗した2本目だけ。3本目には着手しない。
   assert.equal(calls, 2);
 });
 
@@ -256,9 +270,9 @@ test("fetchInChunks はチャンクを concurrency 件までしか同時に実�
   const fetchChunkPage = async () => {
     inFlight += 1;
     maxInFlight = Math.max(maxInFlight, inFlight);
-    // マイクロタスクを何度か挟んで、他のワーカーが追いつく猶予を作る。
-    await microtaskDelay();
-    await microtaskDelay();
+    // 他のワーカーが着手し切る猶予を作る。マクロタスクなら保留中のマイクロタスクが
+    // すべて流れるので、実装側の await 段数が変わっても観測がぶれない。
+    await nextMacrotask();
     inFlight -= 1;
     return { data: [1], error: null };
   };
@@ -275,7 +289,7 @@ test("fetchInChunks は concurrency=1 なら従来どおり直列実行になる
   const fetchChunkPage = async () => {
     inFlight += 1;
     maxInFlight = Math.max(maxInFlight, inFlight);
-    await microtaskDelay();
+    await nextMacrotask();
     inFlight -= 1;
     return { data: [1], error: null };
   };
@@ -290,9 +304,11 @@ test("fetchInChunks は同時実行でも結果をチャンクの元の並び順
   const rowsByChunk: Record<string, number> = { a: 1, b: 2, c: 3 };
   const fetchChunkPage = async (chunk: string[]) => {
     const key = chunk[0];
-    const delays: Record<string, number> = { a: 2, b: 1, c: 0 };
+    // マクロタスクの回数で解決順を作る。setTimeout(0) は FIFO なので、
+    // 回数が多いチャンクほど必ず後に解決する（実装の await 段数には依存しない）。
+    const delays: Record<string, number> = { a: 3, b: 2, c: 1 };
     for (let i = 0; i < delays[key]; i += 1) {
-      await microtaskDelay();
+      await nextMacrotask();
     }
     return { data: [rowsByChunk[key]], error: null };
   };
@@ -324,21 +340,21 @@ test("fetchInChunks はチャンクが失敗したら以降のチャンクに新
   };
 
   const promise = fetchInChunks<string, number>(["a", "b", "c", "d"], fetchChunkPage, 1, 10, 1000, 2);
-  // 失敗を先送りできるよう、rejection を早期に観測しても未処理拒否にならないようにしておく。
-  promise.catch(() => {});
 
-  // "b" の失敗が worker 内で catch → hasError=true まで処理し終わるのを待つ。
-  // この時点でまだ "a" は pending なので、Promise.all 自体はまだ解決していない。
-  for (let i = 0; i < 10; i += 1) {
-    await microtaskDelay();
-  }
+  // "a" を pending のままにしておいても、"b" の失敗は即座に呼び出し元へ伝播する。
+  // この rejection の観測自体が「worker が catch して hasError=true を立て終えた」ことの
+  // 証明になるので、マイクロタスクを決め打ち回数まわして待つ必要がない
+  // （hasError は throw より前に立てられる）。
+  await assert.rejects(promise, /boom/);
   assert.deepEqual(started, ["a", "b"], "b の失敗より前に想定外のチャンクへ着手している");
 
   // ここで初めて "a" を解決させる。"b" が既に失敗している(hasError=true)ので、
   // "a" を終えたワーカーは次のチャンク("c")には着手せず抜けるはず。
   releaseA?.();
 
-  await assert.rejects(promise, /boom/);
+  // 着手済みワーカーの残りの処理が流れ切るのを待ってから、新規着手が無いことを確かめる。
+  await nextMacrotask();
+  await nextMacrotask();
   assert.deepEqual(started, ["a", "b"], "b の失敗後に c/d へ着手してしまっている");
 });
 
@@ -354,8 +370,7 @@ test("fetchInChunks は不正な concurrency でも静かに空を返さず、�
     const fetchChunkPage = async (chunk: string[]) => {
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
-      await microtaskDelay();
-      await microtaskDelay();
+      await nextMacrotask();
       inFlight -= 1;
       return { data: [chunk[0]], error: null };
     };
