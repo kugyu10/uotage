@@ -227,6 +227,129 @@ test("PR #22 再レビュー round3 🟡F: insert-select のコピー元 (select
   assert.deepEqual(rows, [], "拒否された insert-select で行が作られていない");
 });
 
+test("issue #25 🟡G-1: insert or ignore も列位置検査の対象（位置ずれは拒否 / 正位置は通る）", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  // 列リストは (tenant_id, id, name) だが projection 先頭が呼び出し側の任意値。
+  // 旧実装は isInsert が false になり列位置検査を丸ごとスキップしていた。
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "insert or ignore into labels (tenant_id, id, name) select ?, id, email from readers where tenant_id = :tenant",
+        ["evil-tenant"],
+      ),
+    MissingTenantScopeError,
+  );
+  assert.deepEqual(db.prepare("select id from labels").all(), [], "拒否された insert で行が作られていない");
+
+  // 列位置が正しい insert or ignore は従来どおり通ること（過剰拒否になっていない）。
+  // values 形と select 形の両方を通す: 入口判定・VALUES 切り出し・select 切り出しの
+  // 3箇所が同じパターンに揃っていないと、どれかがここで落ちる。
+  await tenantA.run("insert or ignore into labels (id, tenant_id, name) values (?, :tenant, ?)", ["l1", "VIP"]);
+  await tenantA.run(
+    "insert or ignore into labels (id, tenant_id, name) select id, :tenant, email from readers where tenant_id = :tenant",
+  );
+  const rows = (
+    db.prepare("select id, tenant_id from labels order by id").all() as Array<Record<string, unknown>>
+  ).map((row) => ({ ...row }));
+  assert.deepEqual(rows, [
+    { id: "l1", tenant_id: "tenant-a" },
+    { id: "r1", tenant_id: "tenant-a" },
+  ]);
+});
+
+test("issue #25 🟡G-2: replace into / insert or replace は列位置が正しくても拒否される", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  // 位置ずれ（issue #25 が要求する回帰）。
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "replace into labels (tenant_id, id, name) select ?, id, email from readers where tenant_id = :tenant",
+        ["evil-tenant"],
+      ),
+    MissingTenantScopeError,
+  );
+
+  // 列位置が正しくても拒否する。replace 系は主キー衝突した行を暗黙に DELETE するため、
+  // 消える行が他テナントのものでないことを列位置検査では静的に否定できない。
+  await assert.rejects(
+    () => tenantA.run("replace into labels (id, tenant_id, name) values (?, :tenant, ?)", ["l1", "VIP"]),
+    MissingTenantScopeError,
+  );
+  await assert.rejects(
+    () =>
+      tenantA.run("insert or replace into labels (id, tenant_id, name) values (?, :tenant, ?)", ["l1", "VIP"]),
+    MissingTenantScopeError,
+  );
+  assert.deepEqual(db.prepare("select id from labels").all(), [], "拒否された replace で行が作られていない");
+});
+
+test("issue #25 🟡G-3: CTE 前置の insert は静的判定できないため拒否される", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "with s as (select id, email from readers where tenant_id = :tenant) " +
+          "insert into labels (tenant_id, id, name) select ?, id, email from s",
+        ["evil-tenant"],
+      ),
+    MissingTenantScopeError,
+  );
+
+  // 列位置が正しくても、CTE 前置である限り拒否して呼び出し側に書き直させる。
+  await assert.rejects(
+    () =>
+      tenantA.run(
+        "with s as (select id, email from readers where tenant_id = :tenant) " +
+          "insert into labels (tenant_id, id, name) select :tenant, id, email from s",
+      ),
+    MissingTenantScopeError,
+  );
+  assert.deepEqual(db.prepare("select id from labels").all(), [], "拒否された CTE insert で行が作られていない");
+});
+
+test("issue #25 🟢H: 行値代入 set (tenant_id, ...) = (...) も付け替え拒否される", async () => {
+  const { db, executor } = createExecutor();
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await assert.rejects(
+    () =>
+      tenantA.run("update readers set (tenant_id, email) = (?, ?) where tenant_id = :tenant", [
+        "evil-tenant",
+        "evil@example.com",
+      ]),
+    TenantReassignmentError,
+  );
+  // `set(` と空白を置かない書き方でもすり抜けない。
+  await assert.rejects(
+    () =>
+      tenantA.run("update readers set(email,tenant_id)=(?,?) where tenant_id = :tenant", [
+        "evil@example.com",
+        "evil-tenant",
+      ]),
+    TenantReassignmentError,
+  );
+  const untouched = db.prepare("select tenant_id, email from readers where id = ?").get("r1") as {
+    tenant_id: string;
+    email: string;
+  };
+  assert.equal(untouched.tenant_id, "tenant-a", "行が別テナントへ付け替えられた");
+  assert.equal(untouched.email, "a@example.com", "行値代入が実行されてしまった");
+
+  // tenant_id を含まない行値代入は従来どおり通ること（過剰拒否になっていない）。
+  await tenantA.run("update readers set (email, id) = (?, ?) where tenant_id = :tenant", [
+    "new@example.com",
+    "r1",
+  ]);
+  const updated = db.prepare("select email from readers where id = ?").get("r1") as { email: string };
+  assert.equal(updated.email, "new@example.com");
+});
+
 test("PR #22 レビュー 🟡4: update の set 句で tenant_id を付け替えようとすると拒否される", async () => {
   const { db, executor } = createExecutor();
   const tenantA = createTenantDb(executor, "tenant-a");
