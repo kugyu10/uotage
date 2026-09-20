@@ -93,6 +93,16 @@ export async function previewImport(
 
   const { supabase, operator } = await requireOperator();
 
+  // 安価な入力チェック（メモリ上の FormData を見るだけ・I/O なし）はレートリミットより前に置く。
+  // ファイルの選び直しのような操作ミスで枠を食い潰さないため（issue #3 レビュー 🟢8）。
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    return { status: "error", error: "CSVファイルを選択してください。" };
+  }
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
+  }
+
   if (!(await consumeImportRateLimit(operator.user_id))) {
     return { status: "error", error: RATE_LIMIT_ERROR };
   }
@@ -105,14 +115,6 @@ export async function previewImport(
     .maybeSingle();
   if (!scenario) {
     return { status: "error", error: "シナリオが見つかりません。" };
-  }
-
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    return { status: "error", error: "CSVファイルを選択してください。" };
-  }
-  if (file.size > MAX_FILE_SIZE_BYTES) {
-    return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
   }
 
   const text = await file.text();
@@ -276,6 +278,16 @@ export async function confirmImport(
 
   const { supabase, operator } = await requireOperator();
 
+  // 安価な入力チェック（配列の長さを見るだけ）はレートリミットより前に置く
+  // （issue #3 レビュー 🟢8。previewImport と同じ判断）。
+  if (!validRows || validRows.length === 0) {
+    return { status: "error", error: "取り込み対象の行がありません。もう一度ドライランを実行してください。" };
+  }
+  // ドライラン側でも弾いているが、古いプレビュー結果が残っている可能性があるため確定実行でも見る。
+  if (validRows.length > MAX_IMPORT_ROWS) {
+    return { status: "error", error: checkImportRowLimit(validRows.length, 0) ?? "行数が多すぎます。" };
+  }
+
   if (!(await consumeImportRateLimit(operator.user_id))) {
     return { status: "error", error: RATE_LIMIT_ERROR };
   }
@@ -288,14 +300,6 @@ export async function confirmImport(
     .maybeSingle();
   if (!scenario) {
     return { status: "error", error: "シナリオが見つかりません。" };
-  }
-
-  if (!validRows || validRows.length === 0) {
-    return { status: "error", error: "取り込み対象の行がありません。もう一度ドライランを実行してください。" };
-  }
-  // ドライラン側でも弾いているが、古いプレビュー結果が残っている可能性があるため確定実行でも見る。
-  if (validRows.length > MAX_IMPORT_ROWS) {
-    return { status: "error", error: checkImportRowLimit(validRows.length, 0) ?? "行数が多すぎます。" };
   }
 
   const deliveryModeRaw = formData.get("deliveryMode");
