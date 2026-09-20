@@ -17,7 +17,9 @@
 -- 「request_count が上限未満のときだけ update する」形に変える。
 --
 -- register_reader / import_scenario_readers と同じく SECURITY DEFINER + service_role 限定。
--- テーブルには RLS を有効にしたままポリシーを作らない（この RPC 以外から触らせない）。
+-- テーブルには RLS を有効にしたままポリシーを作らない（anon / authenticated からは触れない。
+-- service_role は RLS をバイパスするため、scripts/verify-rate-limit.mjs のような運用系だけが
+-- テーブルを直接触れる）。
 
 create table public.rate_limit_counters (
   limit_key text not null,
