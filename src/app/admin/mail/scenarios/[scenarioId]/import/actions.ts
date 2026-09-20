@@ -6,7 +6,12 @@ import { createUrlToken } from "@/lib/registration";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireOperator } from "@/lib/supabase/server";
 import { isUuid } from "@/lib/uuid";
-import { hashImportCsvText } from "@/lib/csv/file-hash";
+import {
+  decodeImportCsv,
+  hashImportCsvBytes,
+  MAX_IMPORT_FILE_SIZE_BYTES,
+  readConfirmedImportFile,
+} from "@/lib/csv/import-file";
 import { parseImportCsv, type InvalidImportRow } from "@/lib/csv/import-rows";
 import {
   addImportSummary,
@@ -20,8 +25,6 @@ import {
 } from "@/lib/csv/import-batches";
 import { jstDatetimeLocalToUtcIso } from "@/lib/csv/timezone";
 import { fetchAllPages, fetchInChunks } from "@/lib/supabase/paginate";
-
-const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
 export type DeliveryMode = "none" | "from_now" | "from_start";
 
@@ -73,11 +76,14 @@ export async function previewImport(
   if (!(file instanceof File) || file.size === 0) {
     return { status: "error", error: "CSVファイルを選択してください。" };
   }
-  if (file.size > MAX_FILE_SIZE_BYTES) {
+  if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
     return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
   }
 
-  const text = await file.text();
+  // ハッシュは生バイト列に対して取り、パース対象の文字列は確定実行と同じ入口でデコードする。
+  // 両者がずれると「ハッシュは一致するのにパース結果が違う」という壊れ方をする。
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const text = decodeImportCsv(bytes);
   let parsed;
   try {
     parsed = parseImportCsv(text);
@@ -188,7 +194,7 @@ export async function previewImport(
     newLabels,
     invalidRows: parsed.invalidRows.slice(0, MAX_INVALID_ROWS_SHOWN),
     invalidRowsTotal: parsed.invalidRows.length,
-    fileHash: hashImportCsvText(text),
+    fileHash: hashImportCsvBytes(bytes),
   };
 }
 
@@ -255,28 +261,15 @@ export async function confirmImport(
     return { status: "error", error: "シナリオが見つかりません。" };
   }
 
-  // ドライラン必須。expectedFileHash はドライラン成功時にしか発行されない。
-  if (!expectedFileHash) {
-    return { status: "error", error: "先にドライランを実行してください。" };
+  // ドライラン必須・ファイルの有無・サイズ上限・ドライラン済みファイルとの同一性を
+  // まとめて検証する（判定の順序に意味があるため1本の関数に閉じてある）。
+  // ここだけは requireOperator / createAdminClient に依存しないので、
+  // test/unit/csv-import-file.test.ts が FormData を直接渡して挙動を固定できる。
+  const confirmedFile = await readConfirmedImportFile(formData, expectedFileHash);
+  if (!confirmedFile.ok) {
+    return { status: "error", error: confirmedFile.error };
   }
-
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    return { status: "error", error: "CSVファイルを選択して、もう一度ドライランからやり直してください。" };
-  }
-  if (file.size > MAX_FILE_SIZE_BYTES) {
-    return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
-  }
-
-  const text = await file.text();
-  // ドライランで件数を確認したファイルと中身が同じであることを、パースより先に確かめる。
-  // 一致しなければ「表示された件数」と「実際に取り込まれる内容」がずれるため取り込まない。
-  if (hashImportCsvText(text) !== expectedFileHash) {
-    return {
-      status: "error",
-      error: "ドライラン後にファイルが変更されています。もう一度ドライランからやり直してください。",
-    };
-  }
+  const text = confirmedFile.text;
 
   // ハッシュが一致した時点でドライランと同一テキストなのでパースは成功するはずだが、防御的に扱う。
   // ほぼ到達不能な分岐だからこそ、万一来たときに原因を追えるようログを残す（preview 側と同じ流儀）。

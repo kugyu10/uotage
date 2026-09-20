@@ -108,22 +108,30 @@ test('バッチ途中の失敗は status="partial" として、どこまで反�
 test('confirmImport は検証済み行を受け取らず、ファイルを再パースする (issue #2)', () => {
   const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
   // 確定実行のリクエストに含まれたファイルをサーバーで読み直し、パースと行数上限を再適用する。
-  assert.match(confirmFn, /formData\.get\("file"\)/);
+  assert.match(confirmFn, /readConfirmedImportFile\(formData, expectedFileHash\)/);
   assert.match(confirmFn, /parseImportCsv\(text\)/);
   assert.match(confirmFn, /checkImportRowLimit\(parsed\.rows\.length, parsed\.invalidRows\.length\)/);
-  assert.match(confirmFn, /file\.size > MAX_FILE_SIZE_BYTES/);
   // 検証済み行の配列をクライアント経由で受ける実装（RSCペイロード往復）に戻っていないこと。
   // （\b が無いと invalidRows に部分一致してしまう）
-  assert.doesNotMatch(importActions, /\bvalidRows\b/);
-  assert.doesNotMatch(importWizard, /\bvalidRows\b/);
+  // 対象はファイル全体ではなく「往復が起きうる箇所」に絞る。無関係な文脈で validRows という
+  // 識別子を使っただけで落ちるのは、このテストの意図とずれるため（レビュー指摘 🟢6）。
+  const previewStateInterface = importActions.slice(
+    importActions.indexOf('export interface PreviewState'),
+    importActions.indexOf('export const initialPreviewState'),
+  );
+  assert.ok(previewStateInterface.length > 0, 'PreviewState の定義が見つからない');
+  assert.doesNotMatch(previewStateInterface, /\bvalidRows\b/);
+  assert.doesNotMatch(confirmFn, /\bvalidRows\b/);
+  assert.doesNotMatch(importWizard, /confirmImport\.bind\([^)]*\bvalidRows\b/);
 });
 
 test('確定実行はドライラン済みファイルとの同一性をハッシュで検証する (issue #2)', () => {
   const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
-  // ドライランがハッシュを発行し、確定実行はパースより先に照合する。
-  assert.match(previewFn, /fileHash: hashImportCsvText\(text\)/);
-  assert.match(confirmFn, /if \(!expectedFileHash\)/);
-  assert.match(confirmFn, /hashImportCsvText\(text\) !== expectedFileHash/);
+  // ドライランがハッシュを発行し、確定実行は readConfirmedImportFile がパースより先に照合する
+  // （照合そのものの挙動は test/unit/csv-import-file.test.ts が実物を呼んで固定している）。
+  assert.match(previewFn, /fileHash: hashImportCsvBytes\(bytes\)/);
+  assert.match(confirmFn, /readConfirmedImportFile\(formData, expectedFileHash\)/);
+  assert.match(confirmFn, /if \(!confirmedFile\.ok\)/);
   // ウィザードが bind で戻すのはハッシュだけ（bind 引数は暗号化されるため改竄できない）。
   assert.match(importWizard, /confirmImport\.bind\(null, scenarioId, previewState\.fileHash\)/);
   // React 19 は action 付き form の送信後に form.reset() を走らせ file input が空になるため、
