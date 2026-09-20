@@ -29,6 +29,9 @@ test('consume_rate_limit は SECURITY DEFINER + service_role 限定で、テー�
 });
 
 test('カウンタは固定窓で加算され、古い窓は掃除される', () => {
+  // 窓の起点は epoch を window_seconds で切り捨てた固定窓。ここが now() などに化けると
+  // 毎リクエストが新しい窓になり「レートリミットが永久に発火しない」（レビュー 💡3）。
+  assert.match(migrationSql, /floor\(extract\(epoch from now\(\)\) \/ window_seconds\) \* window_seconds/);
   assert.match(migrationSql, /on conflict \(limit_key, window_start\) do update set request_count = counters\.request_count \+ 1/);
   assert.match(migrationSql, /delete from public\.rate_limit_counters/);
   assert.match(migrationSql, /window_start < current_window/);
@@ -90,6 +93,22 @@ test('previewImport と confirmImport は重い処理より前にレートリミ
     confirmFn.indexOf('MAX_IMPORT_ROWS') < confirmFn.indexOf('consumeImportRateLimit'),
     'confirmImport の行数上限チェックはレートリミットより前に置くべき',
   );
+});
+
+test('consumeImportRateLimit は上限値を正しい順序で渡し、例外時は fail-open する', () => {
+  const start = importActions.indexOf('async function consumeImportRateLimit');
+  const end = importActions.indexOf('export type DeliveryMode');
+  assert.ok(start >= 0, 'consumeImportRateLimit の定義が見つからない');
+  assert.ok(end > start, 'consumeImportRateLimit の終端が見つからない');
+  const helper = importActions.slice(start, end);
+
+  // 引数の順序が入れ替わると 60回/10秒 に化けるが、どちらも number なので typecheck では捕まらない。
+  assert.match(
+    helper,
+    /importRateLimitKey\(operatorId\),\s*IMPORT_RATE_LIMIT_MAX_REQUESTS,\s*IMPORT_RATE_LIMIT_WINDOW_SECONDS,/,
+  );
+  // 例外経路の fail-open（レビュー 🟡3 の対応）。false に変わると全インポートが止まる。
+  assert.match(helper, /catch \(error\) \{[\s\S]*?return true;\s*\}/);
 });
 
 test('レートリミットのキーは per-operator（operators.user_id）', () => {
