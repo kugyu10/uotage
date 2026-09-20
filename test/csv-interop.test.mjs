@@ -256,15 +256,36 @@ test('confirmImport supports exactly the three resend-prevention delivery modes,
 
 // ============================== import UI: ドライラン必須の静的アサーション ==============================
 
+/**
+ * JSX の `{cond && (` ブロックを、波括弧の対応を数えて「開始から対応する `}` まで」切り出す。
+ * インデントや行の折り返しに依存しないので、整形が変わっても
+ * 「このブロックの内側にあるか」を見続けられる。
+ */
+function extractJsxBlock(source, startMarker) {
+  const start = source.indexOf(startMarker);
+  assert.ok(start >= 0, `ブロックの開始が見つからない: ${startMarker}`);
+  let depth = 0;
+  for (let i = start; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  assert.fail(`ブロックの終わりが見つからない: ${startMarker}`);
+}
+
 test('the confirm/execute form only renders after a successful dry run, and defaults to the safest option', () => {
   assert.match(importWizard, /previewState\.status === "ready"/);
   // issue #2 以降、確定実行の form は file input を持たず、state に保持した File を
-  // FormData へ詰め直して confirmAction を呼ぶ。ドライラン成功後にしか確定フォームが
-  // 出ない、という性質は previewState.status === "ready" ブロックより前に
-  // confirmAction の呼び出しが現れないことで確認する（構造のみ。挙動は UAT で確認）。
-  const beforeReadySection = importWizard.slice(0, importWizard.indexOf('previewState.status === "ready"'));
-  assert.doesNotMatch(beforeReadySection, /confirmAction\(formData\)/);
-  assert.match(importWizard, /confirmAction\(formData\)/);
+  // FormData へ詰め直して confirmAction を呼ぶ（挙動は UAT で確認。ここは構造のみ）。
+  // 「ドライラン成功後にしか確定フォームが出ない」は、確定実行の呼び出しが
+  // previewState.status === "ready" ブロックの**内側にだけ**あることで確認する。
+  // 「ready より前に現れない」だけでは、form をブロックの後ろへ出した退行
+  // （＝ドライラン前から確定フォームが常時表示される）を検出できない（レビュー指摘 🟡1）。
+  const readySection = extractJsxBlock(importWizard, '{previewState.status === "ready" && (');
+  assert.match(readySection, /confirmAction\(formData\)/);
+  assert.doesNotMatch(importWizard.replace(readySection, ''), /confirmAction\(formData\)/);
   assert.match(importWizard, /useState<DeliveryMode>\("none"\)/);
   assert.match(importWizard, /value="none"/);
   assert.match(importWizard, /value="from_now"/);
