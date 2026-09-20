@@ -220,6 +220,31 @@ test("fetchInChunks は maxRows を超えたら TOO_MANY_ROWS を throw する",
   await assert.rejects(() => fetchInChunks(keys, fetchChunkPage, { chunkSize: 2, pageSize: 10, maxRows: 5 }), new RegExp(TOO_MANY_ROWS));
 });
 
+test("fetchInChunks は1チャンク内で maxRows を超えた時点で打ち切る", async () => {
+  // 内側の fetchAllPages に maxRows を渡し忘れると、内側は既定の 50,000 行まで引けてしまい、
+  // チャンクを最後まで取り切ってから外側の判定で throw することになる。
+  // どちらも TOO_MANY_ROWS を投げるので、区別できるのはページ取得の回数だけ。
+  const rowsByKey = { a: Array.from({ length: 10 }, (_unused, index) => index) };
+  const pages: Array<[number, number]> = [];
+  const fetchChunkPage = (chunk: string[], from: number, to: number) => {
+    pages.push([from, to]);
+    const matched = chunk.flatMap((key) => (rowsByKey[key as "a"] ?? []).map((value) => ({ key, value })));
+    return Promise.resolve({ data: matched.slice(from, to + 1), error: null });
+  };
+
+  await assert.rejects(
+    () => fetchInChunks(["a"], fetchChunkPage, { chunkSize: 10, pageSize: 2, maxRows: 3 }),
+    new RegExp(TOO_MANY_ROWS),
+  );
+
+  // 0-1 で2行（上限内）、2-3 で4行になり上限3を超えるのでそこで止まる。
+  // 内側に maxRows が渡っていないと 10行を取り切る 0-1/2-3/4-5/6-7/8-9/10-11 の6回になる。
+  assert.deepEqual(pages, [
+    [0, 1],
+    [2, 3],
+  ]);
+});
+
 test("fetchInChunks は不正な chunkSize でも無限ループせず既定値で割る", async () => {
   const { fetchChunkPage, chunks } = fakeKeyedTable({ a: [1], b: [2] });
   await fetchInChunks(["a", "b"], fetchChunkPage, { chunkSize: 0 });
