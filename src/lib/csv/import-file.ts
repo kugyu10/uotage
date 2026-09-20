@@ -23,6 +23,13 @@ import { createHash } from "node:crypto";
 /** アップロードを受け付けるCSVの上限。行数上限（MAX_IMPORT_ROWS）とは別の防御。 */
 export const MAX_IMPORT_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
+/**
+ * 上限超過の文言。定数と同じ場所に置いて、片方だけ変えたときに
+ * 「5MBと書いてあるのに実際は別の値」という嘘が生まれないようにする。
+ * ドライラン（actions.ts）と確定実行（下の readConfirmedImportFile）の両方がこれを使う。
+ */
+export const IMPORT_FILE_TOO_LARGE_ERROR = "ファイルサイズが大きすぎます（5MB以下にしてください）。";
+
 /** 同一性の判定に使うハッシュ。生バイト列の SHA-256（hex 64桁）。 */
 export function hashImportCsvBytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -32,7 +39,9 @@ export function hashImportCsvBytes(bytes: Uint8Array): string {
  * ドライランと確定実行が必ず同じ文字列を見るための、単一のデコード入口。
  * 片方だけ別のデコード経路を使うと、ハッシュが一致しているのにパース結果が
  * 食い違うという最も厄介な壊れ方をするため、ここに1本化する。
- * BOM は parseCsv 側が除去するのでここでは触らない。
+ * 先頭の BOM は TextDecoder("utf-8") が既定（ignoreBOM: false）で自分で除去する。
+ * parseCsv 側にも BOM 除去の保険があるため、この経路ではそちらが空振りになるだけ。
+ * ignoreBOM: true を足したくなったときは、先頭に U+FEFF が残る点に注意すること。
  */
 export function decodeImportCsv(bytes: Uint8Array): string {
   return new TextDecoder("utf-8").decode(bytes);
@@ -61,7 +70,7 @@ export async function readConfirmedImportFile(
     return { ok: false, error: "CSVファイルを選択して、もう一度ドライランからやり直してください。" };
   }
   if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
-    return { ok: false, error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
+    return { ok: false, error: IMPORT_FILE_TOO_LARGE_ERROR };
   }
 
   const bytes = new Uint8Array(await file.arrayBuffer());

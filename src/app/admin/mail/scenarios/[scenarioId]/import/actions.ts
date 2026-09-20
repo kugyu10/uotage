@@ -9,6 +9,7 @@ import { isUuid } from "@/lib/uuid";
 import {
   decodeImportCsv,
   hashImportCsvBytes,
+  IMPORT_FILE_TOO_LARGE_ERROR,
   MAX_IMPORT_FILE_SIZE_BYTES,
   readConfirmedImportFile,
 } from "@/lib/csv/import-file";
@@ -77,7 +78,7 @@ export async function previewImport(
     return { status: "error", error: "CSVファイルを選択してください。" };
   }
   if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
-    return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
+    return { status: "error", error: IMPORT_FILE_TOO_LARGE_ERROR };
   }
 
   // ハッシュは生バイト列に対して取り、パース対象の文字列は確定実行と同じ入口でデコードする。
