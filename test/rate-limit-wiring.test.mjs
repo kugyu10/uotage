@@ -44,7 +44,7 @@ test('previewImport と confirmImport は重い処理（ファイル読み込み
   const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
 
   for (const [name, fn] of [['previewImport', previewFn], ['confirmImport', confirmFn]]) {
-    const consumeAt = fn.indexOf('consumeImportRateLimit(userId)');
+    const consumeAt = fn.indexOf('consumeImportRateLimit(operator.user_id)');
     assert.ok(consumeAt >= 0, `${name} がレートリミットを消費していない`);
     const fileReadAt = fn.indexOf('formData.get("file")');
     if (fileReadAt >= 0) {
@@ -54,7 +54,10 @@ test('previewImport と confirmImport は重い処理（ファイル読み込み
   }
 });
 
-test('レートリミットのキーは per-operator（auth のユーザーID）', () => {
-  assert.match(serverTs, /userId: auth\.user\.id/);
-  assert.match(importActions, /importRateLimitKey\(userId\)/);
+test('レートリミットのキーは per-operator（operators.user_id）', () => {
+  // Cloudflare Access 移行後、オペレーターの識別子は operators.user_id
+  // （Access が検証した正規化済みメールアドレス）。requireOperator がこれを返し続けること。
+  assert.match(serverTs, /\.select\("tenant_id, user_id"\)/);
+  assert.match(importActions, /importRateLimitKey\(operatorId\)/);
+  assert.match(importActions, /consumeImportRateLimit\(operator\.user_id\)/);
 });

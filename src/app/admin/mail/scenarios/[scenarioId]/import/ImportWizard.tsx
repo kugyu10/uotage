@@ -10,7 +10,7 @@ import {
   initialPreviewState,
   previewImport,
   type DeliveryMode,
-} from "./actions";
+} from "./actions.ts";
 
 export function ImportWizard({ scenarioId }: { scenarioId: string }) {
   const boundPreviewImport = previewImport.bind(null, scenarioId);

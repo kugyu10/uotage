@@ -41,12 +41,15 @@ const RATE_LIMIT_ERROR = "短時間に操作が集中しています。1分ほ�
  *
  * fail-open は例外経路まで含めて成立させる（createAdminClient は環境変数欠落で throw
  * しうる。レートリミットの障害でインポート全体を落とさない）。
+ *
+ * @param operatorId requireOperator() が返す operators.user_id（Cloudflare Access が
+ *   検証した正規化済みメールアドレス）。Supabase Auth 撤去後の per-operator 識別子。
  */
-async function consumeImportRateLimit(userId: string): Promise<boolean> {
+async function consumeImportRateLimit(operatorId: string): Promise<boolean> {
   try {
     return await consumeRateLimit(
       createAdminClient(),
-      importRateLimitKey(userId),
+      importRateLimitKey(operatorId),
       IMPORT_RATE_LIMIT_MAX_REQUESTS,
       IMPORT_RATE_LIMIT_WINDOW_SECONDS,
     );
@@ -88,9 +91,9 @@ export async function previewImport(
     return { status: "error", error: "シナリオが見つかりません。" };
   }
 
-  const { supabase, operator, userId } = await requireOperator();
+  const { supabase, operator } = await requireOperator();
 
-  if (!(await consumeImportRateLimit(userId))) {
+  if (!(await consumeImportRateLimit(operator.user_id))) {
     return { status: "error", error: RATE_LIMIT_ERROR };
   }
 
@@ -271,9 +274,9 @@ export async function confirmImport(
     return { status: "error", error: "シナリオが見つかりません。" };
   }
 
-  const { supabase, operator, userId } = await requireOperator();
+  const { supabase, operator } = await requireOperator();
 
-  if (!(await consumeImportRateLimit(userId))) {
+  if (!(await consumeImportRateLimit(operator.user_id))) {
     return { status: "error", error: RATE_LIMIT_ERROR };
   }
 

@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { requireOperator } from "@/lib/supabase/server";
 import { isUuid } from "@/lib/uuid";
 
-import { ImportWizard } from "./ImportWizard";
+import { ImportWizard } from "./ImportWizard.tsx";
 
 export const dynamic = "force-dynamic";
 

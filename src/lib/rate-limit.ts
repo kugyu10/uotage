@@ -30,9 +30,15 @@ export function allowRegistration(key: string, now = Date.now()): boolean {
 export const IMPORT_RATE_LIMIT_MAX_REQUESTS = 10;
 export const IMPORT_RATE_LIMIT_WINDOW_SECONDS = 60;
 
-/** ドライランと確定実行で同じキーを使い、経路合算で数える。 */
-export function importRateLimitKey(userId: string): string {
-  return `csv-import:${userId}`;
+/**
+ * ドライランと確定実行で同じキーを使い、経路合算で数える。
+ *
+ * @param operatorId requireOperator() が返す `operators.user_id`。Supabase Auth 撤去後は
+ *   Cloudflare Access が検証した正規化済みメールアドレスが入る（#9 の移行）。
+ *   オペレーターを一意に識別できる値であればよく、キーの中身は DB 内でしか使わない。
+ */
+export function importRateLimitKey(operatorId: string): string {
+  return `csv-import:${operatorId}`;
 }
 
 /** consume_rate_limit RPC を呼べるクライアント（実体は service_role の Supabase クライアント）。 */
