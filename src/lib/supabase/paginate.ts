@@ -39,6 +39,29 @@ interface PageResult<T> {
 }
 
 /**
+ * fetchAllPages の調整用パラメータ。
+ *
+ * すべて `number` の位置引数だと `chunkSize` と `pageSize` を取り違えてもコンパイルが
+ * 通ってしまう（issue #5）。名前で指定させることで取り違えを型レベルで防ぐ。
+ *
+ * `chunkSize` をここに含めない（fetchInChunks 側にだけ置く）のは、両関数で型を共有すると
+ * `fetchAllPages(fn, { chunkSize: 10 })` が「既知のプロパティ」として型検査を通り抜け、
+ * ページサイズが黙って既定値になってしまうため。
+ */
+export interface FetchAllPagesOptions {
+  /** `.range()` で1回に取得する行数の上限。既定値: SUPABASE_PAGE_SIZE */
+  pageSize?: number;
+  /** 取得できる行数の絶対上限。既定値: MAX_PAGINATED_ROWS */
+  maxRows?: number;
+}
+
+/** fetchInChunks の調整用パラメータ。fetchAllPages の分に `chunkSize` を足したもの。 */
+export interface FetchInChunksOptions extends FetchAllPagesOptions {
+  /** `.in(column, keys)` に渡すキー数の上限。既定値: SUPABASE_IN_CHUNK_SIZE */
+  chunkSize?: number;
+}
+
+/**
  * `fetchPage(from, to)` を最後のページまで呼び出し、全行を連結して返す。
  *
  * 呼び出し側の責務:
@@ -50,8 +73,7 @@ interface PageResult<T> {
  */
 export async function fetchAllPages<T>(
   fetchPage: (from: number, to: number) => PromiseLike<PageResult<T>>,
-  pageSize: number = SUPABASE_PAGE_SIZE,
-  maxRows: number = MAX_PAGINATED_ROWS,
+  { pageSize = SUPABASE_PAGE_SIZE, maxRows = MAX_PAGINATED_ROWS }: FetchAllPagesOptions = {},
 ): Promise<T[]> {
   const size = Number.isFinite(pageSize) && pageSize >= 1 ? Math.floor(pageSize) : SUPABASE_PAGE_SIZE;
   const rows: T[] = [];
@@ -98,16 +120,18 @@ export const SUPABASE_IN_CHUNK_SIZE = 500;
  *
  * チャンクは直列に処理する。並列化すると往復回数ぶんレイテンシが縮むが、
  * 無制限に並列化すると Supabase のコネクションを食い潰すため、並列度は実測してから
- * 決める（issue #6）。調整用の引数がすべて数値の位置引数である点も既知（issue #5）。
+ * 決める（issue #6）。
  * `fetchChunkPage` は `(chunk, from, to)` を受け、`.in(column, chunk).order(...).range(from, to)`
  * を組むこと。keys は重複除去してから使うので、呼び出し側で dedupe しなくてよい。
  */
 export async function fetchInChunks<K, T>(
   keys: readonly K[],
   fetchChunkPage: (chunk: K[], from: number, to: number) => PromiseLike<PageResult<T>>,
-  chunkSize: number = SUPABASE_IN_CHUNK_SIZE,
-  pageSize: number = SUPABASE_PAGE_SIZE,
-  maxRows: number = MAX_PAGINATED_ROWS,
+  {
+    chunkSize = SUPABASE_IN_CHUNK_SIZE,
+    pageSize = SUPABASE_PAGE_SIZE,
+    maxRows = MAX_PAGINATED_ROWS,
+  }: FetchInChunksOptions = {},
 ): Promise<T[]> {
   const uniqueKeys = Array.from(new Set(keys));
   if (uniqueKeys.length === 0) return [];
@@ -117,10 +141,12 @@ export async function fetchInChunks<K, T>(
 
   for (let start = 0; start < uniqueKeys.length; start += size) {
     const chunk = uniqueKeys.slice(start, start + size);
+    // maxRows は内側にも渡す。渡さないと1チャンクが単独で上限を超えるケース
+    // （1キーが大量の行を持つ 1:N）でチャンクを最後まで引き切ってから throw することになり、
+    // 打ち切りのための上限なのにメモリと往復を無駄に使う。
     const chunkRows = await fetchAllPages<T>(
       (from, to) => fetchChunkPage(chunk, from, to),
-      pageSize,
-      maxRows,
+      { pageSize, maxRows },
     );
     rows.push(...chunkRows);
     if (rows.length > maxRows) throw new Error(TOO_MANY_ROWS);
