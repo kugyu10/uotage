@@ -55,10 +55,12 @@ export interface FetchAllPagesOptions {
   maxRows?: number;
 }
 
-/** fetchInChunks の調整用パラメータ。fetchAllPages の分に `chunkSize` を足したもの。 */
+/** fetchInChunks の調整用パラメータ。fetchAllPages の分に `chunkSize` と `concurrency` を足したもの。 */
 export interface FetchInChunksOptions extends FetchAllPagesOptions {
   /** `.in(column, keys)` に渡すキー数の上限。既定値: SUPABASE_IN_CHUNK_SIZE */
   chunkSize?: number;
+  /** 同時に処理するチャンク数の上限。既定値: SUPABASE_CHUNK_CONCURRENCY */
+  concurrency?: number;
 }
 
 /**
@@ -109,6 +111,17 @@ export async function fetchAllPages<T>(
 export const SUPABASE_IN_CHUNK_SIZE = 500;
 
 /**
+ * fetchInChunks でチャンクを同時に処理する最大数。
+ *
+ * Supabase (PgBouncer) のコネクションプールは他のリクエストと共有しているため、
+ * 無制限に `Promise.all` すると枯渇させて他のリクエストを詰まらせる恐れがある
+ * （issue #6）。本番相当環境での実測ができない状況のため、issue で挙げられた
+ * 「2〜4」の範囲の中間値である 3 を暫定値として置く。実運用での計測後に見直すこと
+ * （UAT課題として集約 issue に記録済み）。
+ */
+export const SUPABASE_CHUNK_CONCURRENCY = 3;
+
+/**
  * `.in(column, keys)` の keys を SUPABASE_IN_CHUNK_SIZE 件ずつに分けて引き、全結果を連結する。
  *
  * IDを全件 `.in()` に渡すとクエリ文字列が数百KBになり URI長制限（414）に当たる。
@@ -118,9 +131,24 @@ export const SUPABASE_IN_CHUNK_SIZE = 500;
  * 1チャンク分の結果自体がページサイズを超えることもある（例: reader_labels は
  * 1読者が複数行）ため、チャンク内はさらに fetchAllPages でページングする。
  *
- * チャンクは直列に処理する。並列化すると往復回数ぶんレイテンシが縮むが、
- * 無制限に並列化すると Supabase のコネクションを食い潰すため、並列度は実測してから
- * 決める（issue #6）。
+ * チャンクは `concurrency` 件までを同時に処理するワーカープール方式で処理する
+ * （既定値は SUPABASE_CHUNK_CONCURRENCY）。結果はチャンクの元の並び順で連結するため、
+ * どのチャンクが先に解決してもキーの順序は変わらない。
+ * いずれかのチャンクが失敗したら、以降のチャンクを新たに着手させない。エラーは
+ * `Promise.all` の性質上、他の同時実行中チャンクの完了を待たずに即座に伝播する
+ * （部分的な結果でCSVや集計を作らないという既存方針は維持しつつ、失敗が分かった
+ * 時点で呼び出し元を待たせない）。ただし hasError が見えるのは「次のチャンクに着手する
+ * 直前」だけで、fetchAllPages の中のページングループには伝わらない。つまり着手済みの
+ * チャンクは、他が既に失敗していても自分の最終ページまで引き切ってから終わる
+ * （1チャンクが多ページになる reader_labels のような 1:N では、誰も読まないクエリが
+ * 数往復ぶん DB に飛ぶ。結果は破棄される）。直列時には起こらなかった挙動なので、
+ * ページ単位で止めたくなったら fetchAllPages に中断フックを足すことになる
+ * （シグネチャ変更になるため今回のスコープ外）。
+ * ピークメモリは概ね (1 + concurrency) × maxRows 行ぶんまで膨らみうる点に注意
+ * （累積結果が最大 maxRows 行、加えて実行中の各ワーカーが fetchAllPages 内に
+ * 最大 maxRows 行のバッファを持つ。直列時の約2倍 → 並列度3で約4倍）。
+ * maxRows を引き上げるときはこの倍率も勘定に入れること。
+ *
  * `fetchChunkPage` は `(chunk, from, to)` を受け、`.in(column, chunk).order(...).range(from, to)`
  * を組むこと。keys は重複除去してから使うので、呼び出し側で dedupe しなくてよい。
  */
@@ -131,26 +159,62 @@ export async function fetchInChunks<K, T>(
     chunkSize = SUPABASE_IN_CHUNK_SIZE,
     pageSize = SUPABASE_PAGE_SIZE,
     maxRows = MAX_PAGINATED_ROWS,
+    concurrency = SUPABASE_CHUNK_CONCURRENCY,
   }: FetchInChunksOptions = {},
 ): Promise<T[]> {
   const uniqueKeys = Array.from(new Set(keys));
   if (uniqueKeys.length === 0) return [];
 
   const size = Number.isFinite(chunkSize) && chunkSize >= 1 ? Math.floor(chunkSize) : SUPABASE_IN_CHUNK_SIZE;
-  const rows: T[] = [];
-
+  const chunks: K[][] = [];
   for (let start = 0; start < uniqueKeys.length; start += size) {
-    const chunk = uniqueKeys.slice(start, start + size);
-    // maxRows は内側にも渡す。渡さないと1チャンクが単独で上限を超えるケース
-    // （1キーが大量の行を持つ 1:N）でチャンクを最後まで引き切ってから throw することになり、
-    // 打ち切りのための上限なのにメモリと往復を無駄に使う。
-    const chunkRows = await fetchAllPages<T>(
-      (from, to) => fetchChunkPage(chunk, from, to),
-      { pageSize, maxRows },
-    );
-    rows.push(...chunkRows);
-    if (rows.length > maxRows) throw new Error(TOO_MANY_ROWS);
+    chunks.push(uniqueKeys.slice(start, start + size));
   }
 
-  return rows;
+  const limit =
+    Number.isFinite(concurrency) && concurrency >= 1
+      ? Math.floor(concurrency)
+      : SUPABASE_CHUNK_CONCURRENCY;
+  // ワーカー0本だと Promise.all([]) が即解決し、エラーも出さずに [] を返してしまう
+  // （このモジュールが排除している「静かな嘘」そのもの）。上のガードを将来の変更が
+  // 壊しても、最低1本は必ず走るよう構造的に下限を固定する。
+  const workerCount = Math.max(1, Math.min(limit, chunks.length));
+
+  const resultsByChunk: T[][] = new Array(chunks.length);
+  let totalRows = 0;
+  let nextIndex = 0;
+  let hasError = false;
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      if (hasError) return;
+      const index = nextIndex;
+      if (index >= chunks.length) return;
+      nextIndex += 1;
+
+      try {
+        const chunk = chunks[index];
+        // maxRows は内側にも渡す。渡さないと1チャンクが単独で上限を超えるケース
+        // （1キーが大量の行を持つ 1:N）でチャンクを最後まで引き切ってから throw することになり、
+        // 打ち切りのための上限なのにメモリと往復を無駄に使う。
+        const chunkRows = await fetchAllPages<T>(
+          (from, to) => fetchChunkPage(chunk, from, to),
+          { pageSize, maxRows },
+        );
+        resultsByChunk[index] = chunkRows;
+        totalRows += chunkRows.length;
+        if (totalRows > maxRows) throw new Error(TOO_MANY_ROWS);
+      } catch (error) {
+        // フラグを立ててから rethrow する。フラグは他のワーカーが次のチャンクに
+        // 着手するのを止めるため、rethrow は Promise.all を即座に reject させるため
+        // （まだ実行中の他チャンクの完了を待たない）。
+        hasError = true;
+        throw error;
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return resultsByChunk.flat();
 }
