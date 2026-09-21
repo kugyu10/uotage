@@ -13,7 +13,13 @@
  *   - insert では列リストの中で tenant_id が実際に置かれている位置の値が
  *     厳密に `:tenant` であることまで検査する（列の並び違いによる付け違いを防ぐ）。
  *   - update で `set` 句が tenant_id を再代入しようとしている場合は常に拒否する
- *     （テナント間で行を付け替える正当な用途は無い）。
+ *     （テナント間で行を付け替える正当な用途は無い）。行値代入 `set (a, b) = (?, ?)` も含む。
+ *   - 静的に安全と判定できない形は最初から受理しない（issue #25 🟡G）:
+ *     CTE 前置の書き込み（`with ... ) insert into ...` / `... update ...` /
+ *     `... delete from ...` の3系統すべて）と、競合行を暗黙に DELETE する
+ *     `insert or replace` / `replace into`。呼び出し側に素直な形で書き直させる。
+ *     CTE 前置の update / delete は、マーカーが CTE 側にだけあれば本体が無絞りでも
+ *     通ってしまう形で、insert 系より実害が大きい（issue #25 レビュー 🟡-2）。
  *   - `:tenant` の値は呼び出し側が渡すのではなく、createTenantDb(executor, tenantId) が
  *     束縛した tenantId が必ず入る。呼び出し側は自分以外のテナントIDをバインドできない。
  *   - マーカー・テーブル名の検査は文字列リテラルやコメントの中身を見ない
@@ -213,13 +219,65 @@ function extractParenGroups(s: string): string[] {
 }
 
 /**
+ * insert の全変種（`insert into` / `insert or rollback|abort|fail|ignore|replace into` /
+ * `replace into`）の**キーワード部分だけ**にマッチするパターン片（テーブル名の手前まで）。
+ *
+ * insert 変種の列挙は、このリポジトリで**ここ1箇所だけ**にする。列挙が複数あると
+ * 片方だけ広げたときに同じ穴が再発する（実際、初版は CTE_PREFIXED_WRITE_RE が
+ * 独自の列挙を持っていて、そちらだけ縮めてもテストが落ちなかった: issue #25 レビュー 🟡-1）。
+ *
+ * 正規表現リテラルだと識別子引用符のバックティックが読みにくいため文字列で組む。
+ */
+const INSERT_HEAD_KEYWORDS_SOURCE =
+  "(?:insert(?:\\s+or\\s+(?:rollback|abort|fail|ignore|replace))?|replace)\\s+into";
+
+/**
+ * insert 変種の「先頭〜列リストの開きかっこ」にマッチするパターン片。
+ *
+ * 入口判定（hasTenantGuard）と列リスト切り出し（parseInsertColumnsAndValues /
+ * insertSelectColumnPositionOk）で**同じ**パターンを使う。旧実装はこの3箇所がそれぞれ
+ * `insert\s+into` 決め打ちで、`insert or ignore into` 等が入口判定に入らず列位置検査を
+ * 丸ごとスキップしていた（issue #25 🟡G）。片方だけ広げると同じ穴が再発するため、
+ * 定義は1箇所に集約する。
+ */
+const INSERT_HEAD_SOURCE = `${INSERT_HEAD_KEYWORDS_SOURCE}\\s+[\\w."\`[\\]]+\\s*\\(`;
+
+/** 文全体が insert 変種で始まっているか（入口判定）。 */
+const INSERT_STATEMENT_RE = new RegExp(`^\\s*${INSERT_HEAD_SOURCE}`, "i");
+
+/**
+ * 競合行を暗黙に DELETE してから挿入する変種（`insert or replace` / `replace into`）。
+ * 列位置検査は「挿入される行」しか見ないため、主キー衝突で消えるのが**他テナントの行**
+ * であることを静的に否定できない。事故防止装置としては受理せず、呼び出し側に
+ * `insert ... on conflict(...) do update set ...`（tenant_id で絞れる形）を書かせる。
+ */
+const DESTRUCTIVE_REPLACE_RE = /^\s*(?:insert\s+or\s+replace|replace)\s+into\b/i;
+
+/**
+ * CTE 前置の書き込み文（`with ... ) insert into ...` / `... update ...` / `... delete from ...`）。
+ * 列リストや set 句の手前に任意の select が挟まるため静的に安全と判定できない。
+ * `select *` や `union` と同様に拒否して呼び出し側に書き直させる（issue #25 🟡G）。
+ *
+ * update / delete も対象に含める（issue #25 レビュー 🟡-2）。`hasEqMarker` は
+ * 「文中のどこかにマーカーがあればよい」しか見ないため、マーカーが CTE 側にだけあれば
+ * 本体の update / delete が完全に無絞りでも通ってしまい、全テナントの行が消える・
+ * 書き換わる。insert 系より実害が大きい。
+ *
+ * insert 変種の列挙は INSERT_HEAD_KEYWORDS_SOURCE を参照する（列挙を2本持たない）。
+ */
+const CTE_PREFIXED_WRITE_RE = new RegExp(
+  `^\\s*with\\b[\\s\\S]*\\b(?:${INSERT_HEAD_KEYWORDS_SOURCE}|update|delete\\s+from)\\b`,
+  "i",
+);
+
+/**
  * insert into <table> (<cols>) values (<vals>), (<vals>), ... の列リストと、
  * **全ての** VALUES タプルを取り出す（無ければ null）。
  * 旧実装は正規表現が最初の1タプルしか捕まえられず、多値 insert の2行目以降が
  * 無検査ですり抜けていた（PR #22 レビュー 🟡A）。
  */
 function parseInsertColumnsAndValues(masked: string): { columns: string[]; valueTuples: string[][] } | null {
-  const match = /insert\s+into\s+[\w."`[\]]+\s*\(([^)]*)\)\s*values\s*([\s\S]*)/i.exec(masked);
+  const match = new RegExp(`${INSERT_HEAD_SOURCE}([^)]*)\\)\\s*values\\s*([\\s\\S]*)`, "i").exec(masked);
   if (!match) return null;
   const columns = splitTopLevel(match[1]).map((c) => stripIdentifierQuotes(c).trim().toLowerCase());
   const tupleStrings = extractParenGroups(match[2]);
@@ -248,7 +306,7 @@ function insertColumnPositionOk(masked: string): boolean {
  * （PR #22 レビュー 🟡A: 「select 由来のため位置検査は意味を持たない」は誤りだった）。
  */
 function insertSelectColumnPositionOk(masked: string): boolean {
-  const match = /insert\s+into\s+[\w."`[\]]+\s*\(([^)]*)\)\s*select\s+([\s\S]*?)\s+from\b/i.exec(masked);
+  const match = new RegExp(`${INSERT_HEAD_SOURCE}([^)]*)\\)\\s*select\\s+([\\s\\S]*?)\\s+from\\b`, "i").exec(masked);
   if (!match) return false;
   const columns = splitTopLevel(match[1]).map((c) => stripIdentifierQuotes(c).trim().toLowerCase());
   const idx = columns.indexOf("tenant_id");
@@ -267,9 +325,14 @@ function insertSelectColumnPositionOk(masked: string): boolean {
  *     厳密に `:tenant` であること。
  *   - insert ... select: コピー元も絞る必要があるため、列リストの tenant_id の位置に
  *     対応する projection 式が厳密に `:tenant` であること（列の並べ間違いを検出できる）。
+ *   - CTE 前置の書き込み・`replace` 変種は静的に安全と判定できないため一律拒否。
  */
 function hasTenantGuard(masked: string): boolean {
-  const isInsert = /^\s*insert\s+into\s+[\w."`[\]]+\s*\(/i.test(masked);
+  // 静的検査が成立しない形は、判定を試みる前に拒否する（issue #25 🟡G）。
+  if (CTE_PREFIXED_WRITE_RE.test(masked)) return false;
+  if (DESTRUCTIVE_REPLACE_RE.test(masked)) return false;
+
+  const isInsert = INSERT_STATEMENT_RE.test(masked);
   const hasEqMarker = /tenant_id\s*=\s*:tenant\b/i.test(masked);
   if (isInsert) {
     const insertsFromSelect = /\)\s*select\b/i.test(masked);
@@ -290,13 +353,24 @@ function hasTenantGuard(masked: string): boolean {
  * 旧実装は (1) 文頭が `update` の文にしか発火せず `on conflict ... do update set` をすり抜け、
  * (2) 左辺の引用識別子 `"tenant_id"` を剥がしていなかったため検出をすり抜けていた
  * （PR #22 レビュー 🟡B）。
+ * さらに (3) SQLite 3.15 以降の行値代入 `set (tenant_id, email) = (?, ?)` は左辺が
+ * かっこ始まりになり、先頭一致の判定をすり抜けていた（issue #25 🟢H）。
  */
 function reassignsTenantId(masked: string): boolean {
-  const match = /\bset\s+([\s\S]*?)(\bwhere\b[\s\S]*|\breturning\b[\s\S]*)?$/i.exec(masked);
+  // `set(a, b) = (?, ?)` のように空白を置かない書き方も拾う。`\bset\b` で語境界を
+  // 要求しているので `offset` / `settings` のような識別子には発火しない。
+  const match = /\bset\b\s*([\s\S]*?)(\bwhere\b[\s\S]*|\breturning\b[\s\S]*)?$/i.exec(masked);
   if (!match) return false;
   const setClause = match[1];
   return splitTopLevel(setClause).some((assignment) => {
     const left = stripIdentifierQuotes(assignment).trim();
+    // 行値代入: 左辺がかっこ始まりなら、閉じかっこまでを列リストとして分解して各列名を見る。
+    // splitTopLevel はかっこ内のカンマで割らないため、代入全体が1要素で渡ってくる。
+    if (left.startsWith("(")) {
+      const close = left.indexOf(")");
+      if (close === -1) return false;
+      return splitTopLevel(left.slice(1, close)).some((column) => /^tenant_id$/i.test(column.trim()));
+    }
     return /^tenant_id\b\s*=/i.test(left);
   });
 }
