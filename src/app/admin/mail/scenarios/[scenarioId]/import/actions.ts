@@ -19,9 +19,47 @@ import {
   type ImportSummary,
 } from "@/lib/csv/import-batches";
 import { jstDatetimeLocalToUtcIso } from "@/lib/csv/timezone";
+import {
+  consumeRateLimit,
+  IMPORT_RATE_LIMIT_MAX_REQUESTS,
+  IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+  importRateLimitKey,
+} from "@/lib/rate-limit";
 import { fetchAllPages, fetchInChunks } from "@/lib/supabase/paginate";
 
 const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+
+const RATE_LIMIT_ERROR = "短時間に操作が集中しています。1分ほど待ってから再度お試しください。";
+
+/**
+ * ドライラン・確定実行の両方で、CSVパースと DB 照会・RPC より前にレートリミットを
+ * 1回消費する（issue #3）。上限は経路合算で1分10回。
+ *
+ * 注意: リクエストボディ（最大8MB）の受信と multipart デコード自体は、Server Action が
+ * 呼ばれる前に Next.js が完了させている。ここで節約できるのはパース以降と DB 往復であり、
+ * 「8MBの受信そのもの」を止められるのは基盤側（WAF等）のレートリミットだけ。
+ *
+ * fail-open は例外経路まで含めて成立させる（createAdminClient は環境変数欠落で throw
+ * しうる。レートリミットの障害でインポート全体を落とさない）。
+ *
+ * @param operatorId requireOperator() が返す operators.user_id（Cloudflare Access が
+ *   検証した正規化済みメールアドレス）。Supabase Auth 撤去後の per-operator 識別子。
+ */
+async function consumeImportRateLimit(operatorId: string): Promise<boolean> {
+  try {
+    return await consumeRateLimit(
+      createAdminClient(),
+      importRateLimitKey(operatorId),
+      IMPORT_RATE_LIMIT_MAX_REQUESTS,
+      IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+    );
+  } catch (error) {
+    console.error("[rate-limit] 消費処理で例外（fail-open で続行）", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
+}
 
 export type DeliveryMode = "none" | "from_now" | "from_start";
 
@@ -55,6 +93,20 @@ export async function previewImport(
 
   const { supabase, operator } = await requireOperator();
 
+  // 安価な入力チェック（メモリ上の FormData を見るだけ・I/O なし）はレートリミットより前に置く。
+  // ファイルの選び直しのような操作ミスで枠を食い潰さないため（issue #3 レビュー 🟢8）。
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    return { status: "error", error: "CSVファイルを選択してください。" };
+  }
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
+  }
+
+  if (!(await consumeImportRateLimit(operator.user_id))) {
+    return { status: "error", error: RATE_LIMIT_ERROR };
+  }
+
   const { data: scenario } = await supabase
     .from("scenarios")
     .select("id")
@@ -63,14 +115,6 @@ export async function previewImport(
     .maybeSingle();
   if (!scenario) {
     return { status: "error", error: "シナリオが見つかりません。" };
-  }
-
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    return { status: "error", error: "CSVファイルを選択してください。" };
-  }
-  if (file.size > MAX_FILE_SIZE_BYTES) {
-    return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
   }
 
   const text = await file.text();
@@ -234,6 +278,20 @@ export async function confirmImport(
 
   const { supabase, operator } = await requireOperator();
 
+  // 安価な入力チェック（配列の長さを見るだけ）はレートリミットより前に置く
+  // （issue #3 レビュー 🟢8。previewImport と同じ判断）。
+  if (!validRows || validRows.length === 0) {
+    return { status: "error", error: "取り込み対象の行がありません。もう一度ドライランを実行してください。" };
+  }
+  // ドライラン側でも弾いているが、古いプレビュー結果が残っている可能性があるため確定実行でも見る。
+  if (validRows.length > MAX_IMPORT_ROWS) {
+    return { status: "error", error: checkImportRowLimit(validRows.length, 0) ?? "行数が多すぎます。" };
+  }
+
+  if (!(await consumeImportRateLimit(operator.user_id))) {
+    return { status: "error", error: RATE_LIMIT_ERROR };
+  }
+
   const { data: scenario } = await supabase
     .from("scenarios")
     .select("id")
@@ -242,14 +300,6 @@ export async function confirmImport(
     .maybeSingle();
   if (!scenario) {
     return { status: "error", error: "シナリオが見つかりません。" };
-  }
-
-  if (!validRows || validRows.length === 0) {
-    return { status: "error", error: "取り込み対象の行がありません。もう一度ドライランを実行してください。" };
-  }
-  // ドライラン側でも弾いているが、古いプレビュー結果が残っている可能性があるため確定実行でも見る。
-  if (validRows.length > MAX_IMPORT_ROWS) {
-    return { status: "error", error: checkImportRowLimit(validRows.length, 0) ?? "行数が多すぎます。" };
   }
 
   const deliveryModeRaw = formData.get("deliveryMode");
