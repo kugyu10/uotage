@@ -213,12 +213,13 @@ test('エクスポートは fetchInChunks の並列度を 1 に固定し、同�
   const calls = callArguments(exportRoute, 'fetchInChunks');
   assert.ok(calls.length > 0, 'エクスポートが fetchInChunks を使わなくなっている');
   for (const args of calls) {
-    // (keys, fetchChunkPage, chunkSize, pageSize, maxRows, concurrency) の6引数。
-    assert.equal(args.length, 6, `fetchInChunks の引数が6つでない: ${args.length}個`);
-    assert.equal(
-      args[5],
-      'exportChunkConcurrency',
-      `並列度を渡していない fetchInChunks がある（第6引数: ${args[5]}）`,
+    // issue #5 で調整用引数はオプションオブジェクトになったので
+    // (keys, fetchChunkPage, { chunkSize, pageSize, maxRows, concurrency }) の3引数。
+    assert.equal(args.length, 3, `fetchInChunks の引数が3つでない: ${args.length}個`);
+    assert.match(
+      args[2],
+      /concurrency:\s*exportChunkConcurrency\b/,
+      `並列度を渡していない fetchInChunks がある（第3引数: ${args[2]}）`,
     );
   }
 });

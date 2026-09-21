@@ -114,10 +114,12 @@ export async function GET(_request: Request, { params }: RouteParams): Promise<R
             .in("id", chunk)
             .order("id")
             .range(pageFrom, pageTo),
-          SUPABASE_IN_CHUNK_SIZE,
-          SUPABASE_PAGE_SIZE,
-          MAX_PAGINATED_ROWS,
-          exportChunkConcurrency,
+          {
+            chunkSize: SUPABASE_IN_CHUNK_SIZE,
+            pageSize: SUPABASE_PAGE_SIZE,
+            maxRows: MAX_PAGINATED_ROWS,
+            concurrency: exportChunkConcurrency,
+          },
         ),
         // 1読者が複数ラベルを持つため、1チャンク分でも行数はページサイズを超えうる。
         // fetchInChunks はチャンク内をさらにページングするのでそれも吸収される。
@@ -130,10 +132,12 @@ export async function GET(_request: Request, { params }: RouteParams): Promise<R
             .order("reader_id")
             .order("label_id")
             .range(pageFrom, pageTo),
-          SUPABASE_IN_CHUNK_SIZE,
-          SUPABASE_PAGE_SIZE,
-          MAX_PAGINATED_ROWS,
-          exportChunkConcurrency,
+          {
+            chunkSize: SUPABASE_IN_CHUNK_SIZE,
+            pageSize: SUPABASE_PAGE_SIZE,
+            maxRows: MAX_PAGINATED_ROWS,
+            concurrency: exportChunkConcurrency,
+          },
         ),
         fetchInChunks<string, { reader_id: string; product_id: string }>(readerIds, (chunk, pageFrom, pageTo) =>
           supabase
@@ -144,10 +148,12 @@ export async function GET(_request: Request, { params }: RouteParams): Promise<R
             .order("reader_id")
             .order("product_id")
             .range(pageFrom, pageTo),
-          SUPABASE_IN_CHUNK_SIZE,
-          SUPABASE_PAGE_SIZE,
-          MAX_PAGINATED_ROWS,
-          exportChunkConcurrency,
+          {
+            chunkSize: SUPABASE_IN_CHUNK_SIZE,
+            pageSize: SUPABASE_PAGE_SIZE,
+            maxRows: MAX_PAGINATED_ROWS,
+            concurrency: exportChunkConcurrency,
+          },
         ),
       ]);
 
