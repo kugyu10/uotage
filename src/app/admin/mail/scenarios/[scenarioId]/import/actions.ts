@@ -25,7 +25,45 @@ import {
   type ImportSummary,
 } from "@/lib/csv/import-batches";
 import { jstDatetimeLocalToUtcIso } from "@/lib/csv/timezone";
+import {
+  consumeRateLimit,
+  IMPORT_RATE_LIMIT_MAX_REQUESTS,
+  IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+  importRateLimitKey,
+} from "@/lib/rate-limit";
 import { fetchAllPages, fetchInChunks } from "@/lib/supabase/paginate";
+
+const RATE_LIMIT_ERROR = "短時間に操作が集中しています。1分ほど待ってから再度お試しください。";
+
+/**
+ * ドライラン・確定実行の両方で、CSVパースと DB 照会・RPC より前にレートリミットを
+ * 1回消費する（issue #3）。上限は経路合算で1分10回。
+ *
+ * 注意: リクエストボディ（最大8MB）の受信と multipart デコード自体は、Server Action が
+ * 呼ばれる前に Next.js が完了させている。ここで節約できるのはパース以降と DB 往復であり、
+ * 「8MBの受信そのもの」を止められるのは基盤側（WAF等）のレートリミットだけ。
+ *
+ * fail-open は例外経路まで含めて成立させる（createAdminClient は環境変数欠落で throw
+ * しうる。レートリミットの障害でインポート全体を落とさない）。
+ *
+ * @param operatorId requireOperator() が返す operators.user_id（Cloudflare Access が
+ *   検証した正規化済みメールアドレス）。Supabase Auth 撤去後の per-operator 識別子。
+ */
+async function consumeImportRateLimit(operatorId: string): Promise<boolean> {
+  try {
+    return await consumeRateLimit(
+      createAdminClient(),
+      importRateLimitKey(operatorId),
+      IMPORT_RATE_LIMIT_MAX_REQUESTS,
+      IMPORT_RATE_LIMIT_WINDOW_SECONDS,
+    );
+  } catch (error) {
+    console.error("[rate-limit] 消費処理で例外（fail-open で続行）", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return true;
+  }
+}
 
 export type DeliveryMode = "none" | "from_now" | "from_start";
 
@@ -63,6 +101,20 @@ export async function previewImport(
 
   const { supabase, operator } = await requireOperator();
 
+  // 安価な入力チェック（メモリ上の FormData を見るだけ・I/O なし）はレートリミットより前に置く。
+  // ファイルの選び直しのような操作ミスで枠を食い潰さないため（issue #3 レビュー 🟢8）。
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    return { status: "error", error: "CSVファイルを選択してください。" };
+  }
+  if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+    return { status: "error", error: IMPORT_FILE_TOO_LARGE_ERROR };
+  }
+
+  if (!(await consumeImportRateLimit(operator.user_id))) {
+    return { status: "error", error: RATE_LIMIT_ERROR };
+  }
+
   const { data: scenario } = await supabase
     .from("scenarios")
     .select("id")
@@ -73,14 +125,7 @@ export async function previewImport(
     return { status: "error", error: "シナリオが見つかりません。" };
   }
 
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    return { status: "error", error: "CSVファイルを選択してください。" };
-  }
-  if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
-    return { status: "error", error: IMPORT_FILE_TOO_LARGE_ERROR };
-  }
-
+  // ファイルの有無とサイズ上限は、レートリミットを消費する前に上で確認済み（issue #3 レビュー 🟢8）。
   // ハッシュは生バイト列に対して取り、パース対象の文字列は確定実行と同じ入口でデコードする。
   // 両者がずれると「ハッシュは一致するのにパース結果が違う」という壊れ方をする。
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -252,6 +297,24 @@ export async function confirmImport(
 
   const { supabase, operator } = await requireOperator();
 
+  // ドライラン必須・ファイルの有無・サイズ上限・ドライラン済みファイルとの同一性を
+  // まとめて検証する（判定の順序に意味があるため1本の関数に閉じてある）。
+  // ここだけは requireOperator / createAdminClient に依存しないので、
+  // test/unit/csv-import-file.test.ts が FormData を直接渡して挙動を固定できる。
+  //
+  // DB 往復を伴わないこの検証はレートリミットより前に置く。ドライランを踏んでいない・
+  // ファイルを差し替えたといった操作ミスで枠を食い潰さないため（issue #3 レビュー 🟢8。
+  // previewImport がサイズ上限を先に見るのと同じ判断）。
+  const confirmedFile = await readConfirmedImportFile(formData, expectedFileHash);
+  if (!confirmedFile.ok) {
+    return { status: "error", error: confirmedFile.error };
+  }
+  const text = confirmedFile.text;
+
+  if (!(await consumeImportRateLimit(operator.user_id))) {
+    return { status: "error", error: RATE_LIMIT_ERROR };
+  }
+
   const { data: scenario } = await supabase
     .from("scenarios")
     .select("id")
@@ -261,16 +324,6 @@ export async function confirmImport(
   if (!scenario) {
     return { status: "error", error: "シナリオが見つかりません。" };
   }
-
-  // ドライラン必須・ファイルの有無・サイズ上限・ドライラン済みファイルとの同一性を
-  // まとめて検証する（判定の順序に意味があるため1本の関数に閉じてある）。
-  // ここだけは requireOperator / createAdminClient に依存しないので、
-  // test/unit/csv-import-file.test.ts が FormData を直接渡して挙動を固定できる。
-  const confirmedFile = await readConfirmedImportFile(formData, expectedFileHash);
-  if (!confirmedFile.ok) {
-    return { status: "error", error: confirmedFile.error };
-  }
-  const text = confirmedFile.text;
 
   // ハッシュが一致した時点でドライランと同一テキストなのでパースは成功するはずだが、防御的に扱う。
   // ほぼ到達不能な分岐だからこそ、万一来たときに原因を追えるようログを残す（preview 側と同じ流儀）。
