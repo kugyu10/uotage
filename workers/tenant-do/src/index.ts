@@ -11,33 +11,38 @@
  * このIssueのスコープ外 — root wrangler.jsonc の TENANT_DO バインディング越しに
  * `env.TENANT_DO.idFromName(tenantId)` で得た stub を使うこと。
  * `idFromName` 以外（`newUniqueId` 等）で作った ID には対応していない
- * （`tenantId()` が id.name を要求する）。
+ * （`src/lib/d1/resolve-tenant-id.ts` の `resolveTenantIdFromDoName` が id.name を要求する）。
  *
  * 未実装（issue #29 の残タスク。register_reader / import_scenario_readers の移植時に追加）:
  *   - registerReader RPC メソッド
  *   - importScenarioReaders RPC メソッド
  *
+ * 直列化について（確定事項。レビュー 🔴-1 で判明）:
+ *   DO の input/output gate は `ctx.storage`（DO 自身のストレージ）への操作しか自動で
+ *   守らない。`env.DB`（D1 バインディング）への fetch は non-storage I/O のため gate の
+ *   対象外——これは実機を待つまでもなく Cloudflare 公式ドキュメントで確定している
+ *   （https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
+ *   「Input gates only protect during storage operations. Non-storage I/O like fetch() ...
+ *   allows other requests to interleave」）。そのため各 RPC メソッドは
+ *   `ctx.blockConcurrencyWhile()` で「読む→書く」区間全体を明示的に囲み、
+ *   同一テナントへの同時呼び出しを直列化している（公式ドキュメントが
+ *   「外部 async 呼び出し中の状態変化を許容できない場合」の用途として挙げている使い方）。
+ *
  * 未検証（このIssueの作業時点。UAT 集約Issue #13 へ）:
  *   - 実際の Cloudflare 環境での DO 作成・D1 バインディングの疎通
- *   - 同一テナントへの同時リクエストが実際にシリアライズされること
- *     （DO の input/output gate は `ctx.storage` への操作は自動的に守るが、
- *     `env.DB`（D1 バインディング）への fetch はその対象外という理解でいる。
- *     この理解が正しいかは実機で未確認。もし正しければ、Stripe webhook が
- *     ほぼ同時に2回届いた場合に processStripePurchase 内の「読む→書く」区間が
- *     割り込まれうる。詳細は processStripePurchase のコメント参照）
+ *   - 実機で blockConcurrencyWhile が意図通り同時リクエストを直列化していること
+ *     （ロジック上の直列化点は上記で確定したが、実機での挙動確認は別）
  */
 import { DurableObject } from "cloudflare:workers";
 
-import { createTenantDb, type D1Executor } from "../../../src/lib/d1/tenant-db.ts";
+import type { D1Executor } from "../../../src/lib/d1/tenant-db.ts";
+import { runProcessStripePurchaseRpc, type RpcResult } from "../../../src/lib/d1/process-stripe-purchase-rpc.ts";
+import type { ProcessStripePurchaseInput } from "../../../src/lib/purchases/process-stripe-purchase.ts";
 
 // tenant-db.ts はこの型を export していない（変更禁止 — #25/#28 で塞いだガードの
 // 対象ファイル。呼び出すだけに留める）ため、D1Executor のメソッドシグネチャから
 // 同じ形をここで再定義する。
 type SqlParam = string | number | null;
-import {
-  processStripePurchase,
-  type ProcessStripePurchaseInput,
-} from "../../../src/lib/purchases/process-stripe-purchase.ts";
 
 export interface Env {
   DB: D1Database;
@@ -70,53 +75,26 @@ export function createD1Executor(db: D1Database): D1Executor {
   };
 }
 
-export interface RpcResult {
-  ok: boolean;
-  /** 失敗時のみ。Error#message。 */
-  error?: string;
-  /** 失敗時のみ。Error#name（呼び出し側が ProductNotFoundError 等を判別するのに使う）。 */
-  errorName?: string;
-}
-
 export class TenantDurableObject extends DurableObject<Env> {
-  /**
-   * このDOインスタンスが担当するテナントID。呼び出し側が
-   * `env.TENANT_DO.idFromName(tenantId)` で作った ID の `name` から取る。
-   * `idFromName` 以外で作られた ID（name を持たない）で呼ばれたら例外にする —
-   * テナント境界を誤って空文字列や undefined で createTenantDb に渡してしまう
-   * 事故を防ぐため（createTenantDb 自体も空文字列を拒否するが、ここでより早く
-   * 分かりやすいメッセージで落とす）。
-   */
-  private tenantId(): string {
-    const name = this.ctx.id.name;
-    if (!name) {
-      throw new Error(
-        "TenantDurableObject は idFromName(tenantId) で解決したIDでのみ呼び出せます。",
-      );
-    }
-    return name;
-  }
-
   /**
    * process_stripe_purchase の移植版を、このテナントのDOの中で実行する。
    * RPC (Workers RPC) として呼び出す想定: `env.TENANT_DO.idFromName(tenantId).processStripePurchase(input)`。
    *
-   * 例外を投げずに `{ ok, error, errorName }` を返す。呼び出し側（Stripe webhook
-   * ハンドラ、このIssueのスコープ外）が errorName で分岐できるようにするため
-   * （例: ProductNotFoundError なら 4xx 相当、それ以外は 5xx でリトライさせる、等）。
+   * テナントID解決（idFromName の name から）・テナント境界つき DB の組み立て・実行・
+   * 例外の `{ ok, error, errorName }` への変換は `runProcessStripePurchaseRpc`
+   * （Cloudflare型非依存、ルート側の npm test で検証済み）に切り出してある。
+   * ここは `this.ctx.id.name` と D1Executor を渡すだけの薄い糊
+   * （Cloudflare型が無いと書けない部分だけ。レビュー 🟡-7）。
+   *
+   * `ctx.blockConcurrencyWhile()` で処理全体を囲む（ヘッダの「直列化について」参照）。
+   * D1 への fetch は input/output gate の対象外なので、これが無いと同一テナントへの
+   * ほぼ同時の2回の呼び出しで `processStripePurchase` 内の「読む→書く」区間が
+   * 割り込まれうる。
    */
   async processStripePurchase(input: ProcessStripePurchaseInput): Promise<RpcResult> {
-    const db = createTenantDb(createD1Executor(this.env.DB), this.tenantId());
-    try {
-      await processStripePurchase(db, input);
-      return { ok: true };
-    } catch (error) {
-      return {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-        errorName: error instanceof Error ? error.name : undefined,
-      };
-    }
+    return this.ctx.blockConcurrencyWhile(() =>
+      runProcessStripePurchaseRpc(createD1Executor(this.env.DB), this.ctx.id.name, input),
+    );
   }
 }
 

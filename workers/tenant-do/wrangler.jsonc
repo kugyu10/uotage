@@ -20,8 +20,12 @@
       {
         // このワーカー自身は TenantDurableObject クラスを export するだけで、
         // 自分から自分を呼ぶことは無いためこのバインディングは現状未使用。
-        // wrangler の仕様上、migrations でクラスを宣言するにはこのワーカーの
-        // wrangler.jsonc に対応する binding が要る（未使用でも定義しておく）。
+        // 「migrations でクラスを宣言するにはこのワーカー自身の wrangler.jsonc に
+        // 対応する binding が要る」という前提で置いているが、これは未検証の推測
+        // （レビュー 🟢-5）。Cloudflare公式ドキュメントに binding 必須という明記は
+        // 見つけられていない。実害は無いため残すが、`npx wrangler versions upload
+        // --dry-run` で binding を外しても通るか確認できれば確定させたい
+        // （UAT 集約Issue #13 の対象外の軽微な確認。時間があれば実施）。
         "name": "TENANT_DO",
         "class_name": "TenantDurableObject"
       }

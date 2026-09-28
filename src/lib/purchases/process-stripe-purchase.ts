@@ -8,6 +8,14 @@
  *     生の D1Executor / D1Database を直接持ち出さない。
  *   - DO がテナントごとに書き込みを直列化するため、この関数自身は排他制御をしない
  *     （Postgres 版の FOR UPDATE 相当は DO の実行モデルが肩代わりする）。
+ *     ただし DO の input/output gate は `ctx.storage`（DO 自身のストレージ）への操作しか
+ *     自動で守らない。`env.DB`（D1 バインディング）への fetch は non-storage I/O のため
+ *     gate の対象外（Cloudflare公式: Rules of Durable Objects）で、この関数の「読む→書く」
+ *     区間は素のままでは割り込まれる。呼び出し側（workers/tenant-do/src/index.ts の
+ *     `TenantDurableObject.processStripePurchase`）が `ctx.blockConcurrencyWhile()` で
+ *     この関数の呼び出し全体を囲むことで直列化を実現している。この関数自身は
+ *     blockConcurrencyWhile の中にいる前提のコードであり、その保証をしない呼び出し元から
+ *     呼ぶと本コメントの前提が崩れる。
  *
  * Postgres 版との既知の差分（判断の記録。ハンドオフファイルにも書く）:
  *   1. 実行順序を「読む・判断する（例外を投げうる）→ 書く（例外を投げない）」の
@@ -27,9 +35,23 @@
  *      真の原子性が必要になった場合は tenant-db.ts に batch() 相当を追加する
  *      判断が要る（別issueで検討。ガードロジックは変えず、同じ prepare() 検査を
  *      複数文に適用する形を想定）。
+ *   3. 事前の重複チェック (`select ... from purchases where tenant_id = :tenant and
+ *      stripe_session_id = ?`) はテナント境界の要求上 tenant_id で絞っている。
+ *      Postgres 版（migration 19行目）は絞っていないため、他テナントの
+ *      stripe_session_id が偶然一致した場合、Postgres 版は何も書かずに return するのに対し
+ *      移植版は reader を upsert してから purchases 側の（`stripe_session_id` が
+ *      グローバル UNIQUE のため発生する）conflict で return する。reader 行だけが残る点が
+ *      Postgres 版と異なる。実運用で Stripe の session_id がテナント間で衝突することは
+ *      まず無いため許容する（レビュー 🟢-1）。
+ *   4. `readers.created_at` / `reader_labels.granted_at` に `input.purchasedAt` を明示的に
+ *      入れている。Postgres 版はどちらも列を指定せず DB 既定（`now()`）に任せているため、
+ *      Stripe webhook が遅延再送された場合に値がずれる（レビュー 🟢-2）。
+ *   5. `buyerEmail` は `.trim().toLowerCase()`、Postgres 版は `lower()` のみで trim していない。
+ *      改善のつもりの差分（レビュー 🟢-3）。
  */
 
 import type { TenantDb } from "../d1/tenant-db.ts";
+import { D1_MAX_BIND_PARAMS } from "../delivery-queue/claim.ts";
 
 export interface ProcessStripePurchaseInput {
   readonly productId: string;
@@ -213,29 +235,51 @@ export async function processStripePurchase(db: TenantDb, input: ProcessStripePu
   if (!scenario || !funnel) return;
 
   const deadlineAt = addHoursIso(input.purchasedAt, funnel.deadline_hours);
-  const enrollment = await db.get<{ id: string }>(
+  // `returning id, registered_at` — Postgres 版は upsert の `returning * into enrollment` で
+  // 受けた enrollment.registered_at を配信予定時刻の基準にする。`on conflict ... do update set
+  // reader_id = excluded.reader_id` は registered_at を更新しないため、既存行がある場合の
+  // enrollment.registered_at は「元の登録時刻」になる（`input.purchasedAt` ではない）。
+  // `returning id` だけだとこの差が静的にも見えず、既に同シナリオへ登録済みの読者が
+  // 再度購入したケースで配信予定時刻が Postgres 版とずれる（レビュー 🟡-6）。
+  const enrollment = await db.get<{ id: string; registered_at: string }>(
     `insert into scenario_readers (id, tenant_id, reader_id, scenario_id, registration_path, registered_at, deadline_at)
      values (?, :tenant, ?, ?, 'stripe', ?, ?)
      on conflict (reader_id, scenario_id) do update set reader_id = excluded.reader_id
-     returning id`,
+     returning id, registered_at`,
     [crypto.randomUUID(), reader.id, scenario.id, input.purchasedAt, deadlineAt],
   );
   if (!enrollment) throw new Error("scenario_readers upsert did not return a row");
 
   if (steps.length === 0) return;
 
-  const valueTuples = steps.map(() => "(?, :tenant, ?, ?, ?, ?)").join(", ");
-  const params = steps.flatMap((step) => [
-    crypto.randomUUID(),
-    enrollment.id,
-    step.id,
-    reader.id,
-    computeStepScheduledAt(input.purchasedAt, step.delay_minutes, step.send_at_hour),
-  ]);
-  await db.run(
-    `insert into deliveries (id, tenant_id, scenario_reader_id, step_message_id, reader_id, scheduled_at)
-     values ${valueTuples}
-     on conflict (scenario_reader_id, step_message_id) do nothing`,
-    params,
-  );
+  // D1 は1クエリあたりのバインドパラメータを最大 D1_MAX_BIND_PARAMS（100）個に制限している。
+  // この関数が渡す params は1ステップにつき5個（id, scenario_reader_id, step_message_id,
+  // reader_id, scheduled_at）だが、`tenant_id` は `:tenant` マーカーとして書いており、
+  // tenant-db.ts の bindTenant() が **行ごとに** 束縛済み tenantId を差し込む
+  // （`values (?, :tenant, ?, ?, ?, ?), (?, :tenant, ?, ?, ?, ?), ...` の各行の :tenant が
+  // 1個ずつ実パラメータになる）。そのため D1 に実際に渡るバインドパラメータは
+  // **1ステップにつき6個**（5 + tenant_id分1個）。21ステップ以上で 21*6=126 個になり
+  // 上限を超える（src/lib/delivery-queue/claim.ts の markDeliveriesSkipped と同じ理由・
+  // 同じ定数でチャンクする）。node:sqlite は上限が桁違いに緩く単体テストでは再現しないため、
+  // チャンクごとの実バインドパラメータ数そのものをアサートで固定する:
+  // test/unit/process-stripe-purchase.test.ts のバインドパラメータ上限テスト参照。
+  const PARAMS_PER_STEP_INCLUDING_TENANT_MARKER = 6;
+  const stepsPerChunk = Math.floor(D1_MAX_BIND_PARAMS / PARAMS_PER_STEP_INCLUDING_TENANT_MARKER);
+  for (let offset = 0; offset < steps.length; offset += stepsPerChunk) {
+    const chunk = steps.slice(offset, offset + stepsPerChunk);
+    const valueTuples = chunk.map(() => "(?, :tenant, ?, ?, ?, ?)").join(", ");
+    const params = chunk.flatMap((step) => [
+      crypto.randomUUID(),
+      enrollment.id,
+      step.id,
+      reader.id,
+      computeStepScheduledAt(enrollment.registered_at, step.delay_minutes, step.send_at_hour),
+    ]);
+    await db.run(
+      `insert into deliveries (id, tenant_id, scenario_reader_id, step_message_id, reader_id, scheduled_at)
+       values ${valueTuples}
+       on conflict (scenario_reader_id, step_message_id) do nothing`,
+      params,
+    );
+  }
 }

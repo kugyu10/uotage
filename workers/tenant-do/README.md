@@ -13,6 +13,11 @@ issue #29 [移行 P5] ADR 方式A（`docs/移行P5-ADR-トランザクション�
 > ルート側 `wrangler.jsonc` からのクロスワーカーバインディング（`script_name`）だけを
 > 先に敷いてある。
 
+> **直列化の実装**: DO の input/output gate は `ctx.storage` への操作しか自動で守らない
+> （D1 バインディングへの fetch は対象外。Cloudflare公式ドキュメントで確定）。そのため
+> 各 RPC メソッドは `ctx.blockConcurrencyWhile()` で処理全体を囲んで直列化している
+> （`src/index.ts` の `TenantDurableObject.processStripePurchase` 参照）。
+
 > **未検証（このIssueの作業時点）**: Cloudflare は未契約（アカウントのみ）のため、実際の
 > `wrangler deploy` / D1 データベース作成 (`wrangler d1 create`) / DO の実機起動は行っていない。
 > ローカルでは `npm install` / `npm run typecheck` / `npx wrangler deploy --dry-run`
