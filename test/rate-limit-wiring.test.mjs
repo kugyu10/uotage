@@ -74,7 +74,7 @@ test('previewImport と confirmImport は重い処理より前にレートリミ
     const consumeAt = fn.indexOf('consumeImportRateLimit(operator.user_id)');
     assert.ok(consumeAt >= 0, `${name} がレートリミットを消費していない`);
     // 重い処理＝ファイル本体の読み込みと DB 往復。どちらもレートリミットより後に来る。
-    for (const heavy of ['await file.text()', '.from("scenarios")']) {
+    for (const heavy of ['await file.arrayBuffer()', 'parseImportCsv(', '.from("scenarios")']) {
       const heavyAt = fn.indexOf(heavy);
       if (heavyAt >= 0) {
         assert.ok(consumeAt < heavyAt, `${name} は ${heavy} より前に消費すべき`);
@@ -83,16 +83,24 @@ test('previewImport と confirmImport は重い処理より前にレートリミ
     assert.match(fn, /RATE_LIMIT_ERROR/);
   }
 
-  // 逆に、I/O を伴わない安価な入力チェックはレートリミットより前に置く
+  // 逆に、DB 往復を伴わない入力チェックはレートリミットより前に置く
   // （操作ミスで枠を食い潰さない。issue #3 レビュー 🟢8）。
-  assert.ok(
-    previewFn.indexOf('MAX_FILE_SIZE_BYTES') < previewFn.indexOf('consumeImportRateLimit'),
-    'previewImport のサイズ上限チェックはレートリミットより前に置くべき',
-  );
-  assert.ok(
-    confirmFn.indexOf('MAX_IMPORT_ROWS') < confirmFn.indexOf('consumeImportRateLimit'),
-    'confirmImport の行数上限チェックはレートリミットより前に置くべき',
-  );
+  //
+  // 存在確認を先に置くのは、この手の「位置を比べる」assertion が、シンボルを
+  // 改名しただけで indexOf が両方 -1 になり、何も守らないまま通ってしまうため
+  // （issue #2 で MAX_FILE_SIZE_BYTES → MAX_IMPORT_FILE_SIZE_BYTES に移動した際に
+  // 実際に空振りになった）。
+  const cheapChecks = [
+    ['previewImport', previewFn, 'MAX_IMPORT_FILE_SIZE_BYTES', 'サイズ上限チェック'],
+    // 確定実行の安価チェックは、ドライラン必須・ファイルの有無・サイズ・ハッシュ一致を
+    // まとめて見る readConfirmedImportFile（DB を触らない）。
+    ['confirmImport', confirmFn, 'readConfirmedImportFile', 'ファイル検証'],
+  ];
+  for (const [name, fn, symbol, label] of cheapChecks) {
+    const at = fn.indexOf(symbol);
+    assert.ok(at >= 0, `${name} に ${symbol} が無い（改名したらこのテストも直すこと）`);
+    assert.ok(at < fn.indexOf('consumeImportRateLimit'), `${name} の${label}はレートリミットより前に置くべき`);
+  }
 });
 
 test('consumeImportRateLimit は上限値を正しい順序で渡し、例外時は fail-open する', () => {

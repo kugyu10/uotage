@@ -105,6 +105,62 @@ test('バッチ途中の失敗は status="partial" として、どこまで反�
   assert.match(confirmFn, /if \(processedRows === 0\)/);
 });
 
+test('confirmImport は検証済み行を受け取らず、ファイルを再パースする (issue #2)', () => {
+  const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
+  // 確定実行のリクエストに含まれたファイルをサーバーで読み直し、パースと行数上限を再適用する。
+  assert.match(confirmFn, /readConfirmedImportFile\(formData, expectedFileHash\)/);
+  assert.match(confirmFn, /parseImportCsv\(text\)/);
+  assert.match(confirmFn, /checkImportRowLimit\(parsed\.rows\.length, parsed\.invalidRows\.length\)/);
+  // 再パース結果は「全行」を取り込む。slice やページングが混ざると
+  // 「5,000行のつもりが一部しか入らない」という静かなデータ欠落になる（レビュー指摘 🟢1）。
+  assert.match(confirmFn, /const rowsPayload = parsed\.rows\.map\(/);
+  // ハッシュ一致＝ドライランと同一テキストなので実質到達しないが、0行で RPC を叩かない
+  // 防御的ガードを残しておく（レビュー指摘 🟢2）。
+  assert.match(confirmFn, /if \(parsed\.rows\.length === 0\)/);
+  // 検証済み行の配列をクライアント経由で受ける実装（RSCペイロード往復）に戻っていないこと。
+  // （\b が無いと invalidRows に部分一致してしまう）
+  // 対象はファイル全体ではなく「往復が起きうる箇所」に絞る。無関係な文脈で validRows という
+  // 識別子を使っただけで落ちるのは、このテストの意図とずれるため（レビュー指摘 🟢6）。
+  const previewStateInterface = importActions.slice(
+    importActions.indexOf('export interface PreviewState'),
+    importActions.indexOf('export const initialPreviewState'),
+  );
+  assert.ok(previewStateInterface.length > 0, 'PreviewState の定義が見つからない');
+  assert.doesNotMatch(previewStateInterface, /\bvalidRows\b/);
+  assert.doesNotMatch(confirmFn, /\bvalidRows\b/);
+  assert.doesNotMatch(importWizard, /confirmImport\.bind\([^)]*\bvalidRows\b/);
+});
+
+test('確定実行はドライラン済みファイルとの同一性をハッシュで検証する (issue #2)', () => {
+  const confirmFn = importActions.slice(importActions.indexOf('export async function confirmImport'));
+  // ドライランがハッシュを発行し、確定実行は readConfirmedImportFile がパースより先に照合する
+  // （照合そのものの挙動は test/unit/csv-import-file.test.ts が実物を呼んで固定している）。
+  assert.match(previewFn, /fileHash: hashImportCsvBytes\(bytes\)/);
+  // デコードは preview / confirm とも decodeImportCsv の1本だけ。片方が file.text() などに
+  // 戻ると「ハッシュは一致するのにパース結果が違う」壊れ方をする（レビュー指摘 🟢3）。
+  assert.match(previewFn, /const text = decodeImportCsv\(bytes\)/);
+  assert.match(confirmFn, /readConfirmedImportFile\(formData, expectedFileHash\)/);
+  assert.match(confirmFn, /if \(!confirmedFile\.ok\)/);
+  // ウィザードが bind で戻すのはハッシュだけ（bind 引数は暗号化されるため改竄できない）。
+  assert.match(importWizard, /confirmImport\.bind\(null, scenarioId, previewState\.fileHash\)/);
+  // React 19 は action 付き form の送信後に form.reset() を走らせ file input が空になるため、
+  // 確定実行は state に保持した File を FormData へ詰め直して送る（レビュー指摘の対応）。
+  // 注意: ここは構造（配線）の検証のみ。実際にファイルがリクエストへ乗るかはブラウザ挙動に
+  // 依存するため、実ブラウザでの確認は UAT (#13) に積んである。
+  assert.match(importWizard, /formData\.set\("file", file\)/);
+  assert.match(importWizard, /confirmAction\(formData\)/);
+  const fileInputs = importWizard.match(/type="file"/g) ?? [];
+  assert.equal(fileInputs.length, 1, 'file input が複数あると再送されるファイルが曖昧になる');
+});
+
+test('ファイルサイズ上限の文言は定数と同じ場所に1つだけ置く (issue #2 レビュー 🟢4)', () => {
+  // 上限値 (MAX_IMPORT_FILE_SIZE_BYTES) と「5MB以下にしてください」という文言が
+  // 別ファイルに分かれると、片方だけ変えたときに嘘の案内になる。
+  // preview / confirm とも import-file.ts の共有定数を使い、actions.ts には直書きしない。
+  assert.match(previewFn, /error: IMPORT_FILE_TOO_LARGE_ERROR/);
+  assert.doesNotMatch(importActions, /"ファイルサイズが大きすぎます/);
+});
+
 test('UIは部分適用を専用の文言で伝え、再実行が安全であることを案内する', () => {
   assert.match(importWizard, /confirmState\.status === "partial"/);
   assert.match(importWizard, /先頭から\{confirmState\.processedRows\}行目までは反映済みです/);
@@ -141,6 +197,102 @@ test('エクスポートは上限超過時に不完全なCSVを返さず 413 に
   assert.match(exportRoute, /MAX_PAGINATED_ROWS\) throw new Error\(TOO_MANY_ROWS\)/);
   assert.match(exportRoute, /error\.message === TOO_MANY_ROWS/);
   assert.match(exportRoute, /status: 413/);
+});
+
+/**
+ * ソース中の `name(...)` / `name<...>(...)` 呼び出しを括弧の対応で切り出し、
+ * 呼び出しごとのトップレベル引数（文字列）の配列を返す。
+ *
+ * `/^\s*foo,$/m` のような行単位の正規表現だと「引数が1行1個」の整形に依存し、
+ * 引数を1行に畳んだだけでコードが正しくてもテストが落ちる。ここは括弧の対応を数えるので
+ * 改行位置に依存しない。文字列リテラル内のカンマ（`.select("id, email")`）も無視する。
+ */
+function callArguments(source, name) {
+  const calls = [];
+  const needle = new RegExp(`\\b${name}\\b`, 'g');
+  let match;
+  while ((match = needle.exec(source)) !== null) {
+    // import 文や日本語コメント中の同名は拾わない。呼び出しなら直後は `<`（型引数）か `(`。
+    const rest = source.slice(match.index + name.length);
+    if (!/^\s*[<(]/.test(rest)) continue;
+    // 型引数 `<...>` にはカッコが出てこないので、呼び出し名の後の最初の `(` が引数リストの開き。
+    const open = source.indexOf('(', match.index);
+    if (open < 0) break;
+    const args = [];
+    let depth = 0;
+    let current = '';
+    let quote = '';
+    for (let i = open; i < source.length; i += 1) {
+      const char = source[i];
+      if (quote) {
+        current += char;
+        if (char === '\\') {
+          current += source[i + 1] ?? '';
+          i += 1;
+        } else if (char === quote) {
+          quote = '';
+        }
+        continue;
+      }
+      if (char === '"' || char === "'" || char === '`') {
+        quote = char;
+        current += char;
+        continue;
+      }
+      if (char === '(' || char === '[' || char === '{') {
+        depth += 1;
+        if (depth === 1) continue; // 引数リストの開きカッコ自体は本文に含めない
+      } else if (char === ')' || char === ']' || char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          if (current.trim()) args.push(current.trim());
+          break;
+        }
+      } else if (char === ',' && depth === 1) {
+        args.push(current.trim());
+        current = '';
+        continue;
+      }
+      current += char;
+    }
+    calls.push(args);
+  }
+  return calls;
+}
+
+test('エクスポートは fetchInChunks の並列度を 1 に固定し、同時リクエストを倍増させない', () => {
+  // issue #6 で fetchInChunks 内が並列化された。エクスポートは Promise.all で
+  // fetchInChunks を3本同時に走らせているので、既定の並列度のままだと同時リクエストが
+  // 3 × SUPABASE_CHUNK_CONCURRENCY へ倍増し、共有コネクションプールを想定外に食う。
+  // レイテンシ改善の対象は取り込みのドライラン側なので、ここは従来どおり「同時3本」に固定する。
+  assert.match(exportRoute, /const exportChunkConcurrency = 1;/);
+  const calls = callArguments(exportRoute, 'fetchInChunks');
+  assert.ok(calls.length > 0, 'エクスポートが fetchInChunks を使わなくなっている');
+  for (const args of calls) {
+    // issue #5 で調整用引数はオプションオブジェクトになったので
+    // (keys, fetchChunkPage, { chunkSize, pageSize, maxRows, concurrency }) の3引数。
+    assert.equal(args.length, 3, `fetchInChunks の引数が3つでない: ${args.length}個`);
+    assert.match(
+      args[2],
+      /concurrency:\s*exportChunkConcurrency\b/,
+      `並列度を渡していない fetchInChunks がある（第3引数: ${args[2]}）`,
+    );
+  }
+});
+
+test('取り込みのドライランは fetchInChunks の並列度を明示せず、既定値に乗る', () => {
+  // issue #6 の本題は previewImport のレイテンシ。ここで並列度を明示してしまうと、
+  // SUPABASE_CHUNK_CONCURRENCY を調整しても取り込み側に効かなくなる（＝直列に戻せてしまう）。
+  // エクスポート側だけ配線テストがある非対称を解消する。
+  const calls = callArguments(previewFn, 'fetchInChunks');
+  assert.equal(calls.length, 2, 'ドライランの fetchInChunks は readers と scenario_readers の2本');
+  for (const args of calls) {
+    assert.equal(
+      args.length,
+      2,
+      `ドライランの fetchInChunks が並列度などを明示している（引数${args.length}個）: ${args.slice(2).join(' / ')}`,
+    );
+  }
 });
 
 test('エクスポートは tenant_id スコープと CSV ヘッダーを維持している', () => {

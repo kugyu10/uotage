@@ -6,14 +6,20 @@ import { createUrlToken } from "@/lib/registration";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireOperator } from "@/lib/supabase/server";
 import { isUuid } from "@/lib/uuid";
-import { parseImportCsv, type InvalidImportRow, type NormalizedImportRow } from "@/lib/csv/import-rows";
+import {
+  decodeImportCsv,
+  hashImportCsvBytes,
+  IMPORT_FILE_TOO_LARGE_ERROR,
+  MAX_IMPORT_FILE_SIZE_BYTES,
+  readConfirmedImportFile,
+} from "@/lib/csv/import-file";
+import { parseImportCsv, type InvalidImportRow } from "@/lib/csv/import-rows";
 import {
   addImportSummary,
   checkImportRowLimit,
   chunkRows,
   EMPTY_IMPORT_SUMMARY,
   IMPORT_BATCH_SIZE,
-  MAX_IMPORT_ROWS,
   MAX_INVALID_ROWS_SHOWN,
   toImportSummary,
   type ImportSummary,
@@ -26,8 +32,6 @@ import {
   importRateLimitKey,
 } from "@/lib/rate-limit";
 import { fetchAllPages, fetchInChunks } from "@/lib/supabase/paginate";
-
-const MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
 const RATE_LIMIT_ERROR = "短時間に操作が集中しています。1分ほど待ってから再度お試しください。";
 
@@ -76,7 +80,11 @@ export interface PreviewState {
   invalidRows?: InvalidImportRow[];
   /** 不正行の総数（invalidRows は切られている可能性があるため別に持つ）。 */
   invalidRowsTotal?: number;
-  validRows?: NormalizedImportRow[];
+  /**
+   * ドライランしたファイル内容の SHA-256。確定実行はファイルを再パースするため、
+   * 検証済み行の代わりにこのハッシュだけを `.bind()` でサーバーへ戻す（issue #2）。
+   */
+  fileHash?: string;
 }
 
 export const initialPreviewState: PreviewState = { status: "idle" };
@@ -99,8 +107,8 @@ export async function previewImport(
   if (!(file instanceof File) || file.size === 0) {
     return { status: "error", error: "CSVファイルを選択してください。" };
   }
-  if (file.size > MAX_FILE_SIZE_BYTES) {
-    return { status: "error", error: "ファイルサイズが大きすぎます（5MB以下にしてください）。" };
+  if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+    return { status: "error", error: IMPORT_FILE_TOO_LARGE_ERROR };
   }
 
   if (!(await consumeImportRateLimit(operator.user_id))) {
@@ -117,7 +125,11 @@ export async function previewImport(
     return { status: "error", error: "シナリオが見つかりません。" };
   }
 
-  const text = await file.text();
+  // ファイルの有無とサイズ上限は、レートリミットを消費する前に上で確認済み（issue #3 レビュー 🟢8）。
+  // ハッシュは生バイト列に対して取り、パース対象の文字列は確定実行と同じ入口でデコードする。
+  // 両者がずれると「ハッシュは一致するのにパース結果が違う」という壊れ方をする。
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const text = decodeImportCsv(bytes);
   let parsed;
   try {
     parsed = parseImportCsv(text);
@@ -228,7 +240,7 @@ export async function previewImport(
     newLabels,
     invalidRows: parsed.invalidRows.slice(0, MAX_INVALID_ROWS_SHOWN),
     invalidRowsTotal: parsed.invalidRows.length,
-    validRows: parsed.rows,
+    fileHash: hashImportCsvBytes(bytes),
   };
 }
 
@@ -249,7 +261,14 @@ export interface ConfirmState {
 export const initialConfirmState: ConfirmState = { status: "idle" };
 
 /**
- * 確定実行: ドライランで検証済みの行だけを受け取り、SECURITY DEFINER RPCへ委譲する。
+ * 確定実行: アップロードされたCSVファイルをサーバーで再パースし、SECURITY DEFINER RPCへ委譲する。
+ *
+ * 検証済み行の配列をクライアント経由で受け取る方式はやめた（issue #2。5,000行で1MB前後の
+ * ペイロードが RSC で下り `.bind()` で戻る無駄な往復になっていた）。代わりに確定実行の
+ * リクエストにもファイルそのものを含め、ここで再パースする。「ドライランで確認した
+ * ファイルと同じものか」は previewImport が返したハッシュ（expectedFileHash、`.bind()` で
+ * 受け取るため改竄不可）との照合で担保する。これによりドライランを経ない取り込み・
+ * ドライラン後に差し替えたファイルの取り込みはどちらも弾かれる。
  *
  * RPCは行ごとに `select ... for update` とラベル解決を回すため、全行を1トランザクションに
  * 渡すと statement timeout に当たる。IMPORT_BATCH_SIZE 件ずつに分けて複数回呼び出し、
@@ -268,7 +287,7 @@ export const initialConfirmState: ConfirmState = { status: "idle" };
  */
 export async function confirmImport(
   scenarioId: string,
-  validRows: NormalizedImportRow[],
+  expectedFileHash: string | undefined,
   _prevState: ConfirmState,
   formData: FormData,
 ): Promise<ConfirmState> {
@@ -278,15 +297,19 @@ export async function confirmImport(
 
   const { supabase, operator } = await requireOperator();
 
-  // 安価な入力チェック（配列の長さを見るだけ）はレートリミットより前に置く
-  // （issue #3 レビュー 🟢8。previewImport と同じ判断）。
-  if (!validRows || validRows.length === 0) {
-    return { status: "error", error: "取り込み対象の行がありません。もう一度ドライランを実行してください。" };
+  // ドライラン必須・ファイルの有無・サイズ上限・ドライラン済みファイルとの同一性を
+  // まとめて検証する（判定の順序に意味があるため1本の関数に閉じてある）。
+  // ここだけは requireOperator / createAdminClient に依存しないので、
+  // test/unit/csv-import-file.test.ts が FormData を直接渡して挙動を固定できる。
+  //
+  // DB 往復を伴わないこの検証はレートリミットより前に置く。ドライランを踏んでいない・
+  // ファイルを差し替えたといった操作ミスで枠を食い潰さないため（issue #3 レビュー 🟢8。
+  // previewImport がサイズ上限を先に見るのと同じ判断）。
+  const confirmedFile = await readConfirmedImportFile(formData, expectedFileHash);
+  if (!confirmedFile.ok) {
+    return { status: "error", error: confirmedFile.error };
   }
-  // ドライラン側でも弾いているが、古いプレビュー結果が残っている可能性があるため確定実行でも見る。
-  if (validRows.length > MAX_IMPORT_ROWS) {
-    return { status: "error", error: checkImportRowLimit(validRows.length, 0) ?? "行数が多すぎます。" };
-  }
+  const text = confirmedFile.text;
 
   if (!(await consumeImportRateLimit(operator.user_id))) {
     return { status: "error", error: RATE_LIMIT_ERROR };
@@ -300,6 +323,28 @@ export async function confirmImport(
     .maybeSingle();
   if (!scenario) {
     return { status: "error", error: "シナリオが見つかりません。" };
+  }
+
+  // ハッシュが一致した時点でドライランと同一テキストなのでパースは成功するはずだが、防御的に扱う。
+  // ほぼ到達不能な分岐だからこそ、万一来たときに原因を追えるようログを残す（preview 側と同じ流儀）。
+  let parsed;
+  try {
+    parsed = parseImportCsv(text);
+  } catch (error) {
+    console.error("[csv-import] 確定実行の再パースに失敗", {
+      scenarioId,
+      tenantId: operator.tenant_id,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return { status: "error", error: "CSVの読み込みに失敗しました。もう一度ドライランからやり直してください。" };
+  }
+
+  const rowLimitError = checkImportRowLimit(parsed.rows.length, parsed.invalidRows.length);
+  if (rowLimitError) {
+    return { status: "error", error: rowLimitError };
+  }
+  if (parsed.rows.length === 0) {
+    return { status: "error", error: "取り込み対象の行がありません。もう一度ドライランを実行してください。" };
   }
 
   const deliveryModeRaw = formData.get("deliveryMode");
@@ -327,7 +372,7 @@ export async function confirmImport(
     }
   }
 
-  const rowsPayload = validRows.map((row) => ({
+  const rowsPayload = parsed.rows.map((row) => ({
     email: row.email,
     name: row.name,
     registration_path: row.registrationPath,

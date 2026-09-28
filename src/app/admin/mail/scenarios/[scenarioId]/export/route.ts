@@ -5,6 +5,7 @@ import {
   fetchAllPages,
   fetchInChunks,
   MAX_PAGINATED_ROWS,
+  SUPABASE_IN_CHUNK_SIZE,
   SUPABASE_PAGE_SIZE,
   TOO_MANY_ROWS,
 } from "@/lib/supabase/paginate";
@@ -88,6 +89,13 @@ export async function GET(_request: Request, { params }: RouteParams): Promise<R
 
       const readerIds = Array.from(new Set(page.map((row) => row.reader_id)));
 
+      // この Promise.all は fetchInChunks を3本同時に走らせる。fetchInChunks 自体が
+      // チャンクを並列処理する（issue #6）ようになったため、既定の並列度のままだと
+      // 同時リクエストが 3 × SUPABASE_CHUNK_CONCURRENCY 本へ倍増し、共有している
+      // コネクションプールを想定外に食う。エクスポートはレイテンシ改善の対象ではない
+      // ので、各 fetchInChunks には concurrency = 1 を明示して従来どおり
+      // 「同時3本」を維持する（実測して緩める場合は UAT 課題 #13 を参照）。
+      const exportChunkConcurrency = 1;
       const [readers, readerLabels, purchases] = await Promise.all([
         fetchInChunks<
           string,
@@ -106,6 +114,12 @@ export async function GET(_request: Request, { params }: RouteParams): Promise<R
             .in("id", chunk)
             .order("id")
             .range(pageFrom, pageTo),
+          {
+            chunkSize: SUPABASE_IN_CHUNK_SIZE,
+            pageSize: SUPABASE_PAGE_SIZE,
+            maxRows: MAX_PAGINATED_ROWS,
+            concurrency: exportChunkConcurrency,
+          },
         ),
         // 1読者が複数ラベルを持つため、1チャンク分でも行数はページサイズを超えうる。
         // fetchInChunks はチャンク内をさらにページングするのでそれも吸収される。
@@ -118,6 +132,12 @@ export async function GET(_request: Request, { params }: RouteParams): Promise<R
             .order("reader_id")
             .order("label_id")
             .range(pageFrom, pageTo),
+          {
+            chunkSize: SUPABASE_IN_CHUNK_SIZE,
+            pageSize: SUPABASE_PAGE_SIZE,
+            maxRows: MAX_PAGINATED_ROWS,
+            concurrency: exportChunkConcurrency,
+          },
         ),
         fetchInChunks<string, { reader_id: string; product_id: string }>(readerIds, (chunk, pageFrom, pageTo) =>
           supabase
@@ -128,6 +148,12 @@ export async function GET(_request: Request, { params }: RouteParams): Promise<R
             .order("reader_id")
             .order("product_id")
             .range(pageFrom, pageTo),
+          {
+            chunkSize: SUPABASE_IN_CHUNK_SIZE,
+            pageSize: SUPABASE_PAGE_SIZE,
+            maxRows: MAX_PAGINATED_ROWS,
+            concurrency: exportChunkConcurrency,
+          },
         ),
       ]);
 
