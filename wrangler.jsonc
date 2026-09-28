@@ -35,7 +35,38 @@
       "binding": "WORKER_SELF_REFERENCE",
       "service": "uotage-web"
     }
-  ]
+  ],
+  // issue #29 [移行 P5]: register_reader / process_stripe_purchase /
+  // import_scenario_readers 用の D1。実体は workers/tenant-do 側の
+  // TenantDurableObject が触る（ADR 方式A: テナント単位の直列化）。
+  // このアプリ（Next.js API routes）側は今回のスコープでは直接読み書きしない
+  // （Stripe webhook ハンドラの DO 経由への切替は #29 の残タスク。それまでは
+  // 現行どおり Supabase RPC を呼ぶ — src/app/api/stripe/webhook/route.ts 参照）。
+  // それでも d1_databases をここに置くのは、この Worker（uotage-web）が将来
+  // 直接 D1 を読む経路（例: 管理画面の参照系）を持つときに同じ binding 名 "DB" で
+  // 揃えるため。database_id は実インフラ作成後の実値に差し替える必要がある
+  // （`wrangler d1 create` は未実行。未検証: UAT #13 へ）。
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "uotage-db",
+      "database_id": "REPLACE_WITH_REAL_D1_DATABASE_ID"
+    }
+  ],
+  // issue #29 [移行 P5] ADR 方式A: テナント単位で書き込みを直列化する Durable Object。
+  // クラス本体は別ワーカー workers/tenant-do が export する（script_name でクロス
+  // ワーカー参照）。クラスの migrations（new_sqlite_classes 等）は、クラスを
+  // 定義するワーカー側（workers/tenant-do/wrangler.jsonc）に書く — こちらには書かない
+  // （Cloudflare Durable Objects Class Migrations のドキュメント参照）。
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TENANT_DO",
+        "class_name": "TenantDurableObject",
+        "script_name": "uotage-tenant-do"
+      }
+    ]
+  }
   // 環境変数・シークレットはここに書かない。
   // 移行方針は docs/cloudflare-workers-hosting.md を参照。
 }

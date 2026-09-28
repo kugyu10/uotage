@@ -1,0 +1,16 @@
+{
+  "name": "uotage-tenant-do",
+  "version": "0.1.0",
+  "private": true,
+  "description": "issue #29 [移行 P5] テナント単位の書き込み直列化用 Durable Object（ADR 方式A）。root の wrangler.jsonc から script_name でクロスワーカー参照される。",
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260911.1",
+    "typescript": "^5",
+    "wrangler": "^4.131.0"
+  }
+}
