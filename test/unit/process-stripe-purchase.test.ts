@@ -55,6 +55,8 @@ function seedTenant(
     deadlineHours?: number;
     /** funnels.product_id に入れる値。省略時は opts.productId（レビュー 🟡-3 用に分離）。 */
     funnelProductId?: string;
+    /** funnels.trigger_type に入れる値。省略時は 'purchase'（レビュー 🟡-B 用に分離）。 */
+    funnelTriggerType?: string;
   },
 ) {
   const now = "2026-09-01T00:00:00.000Z";
@@ -77,12 +79,13 @@ function seedTenant(
   }
   if (opts.funnelId) {
     db.prepare(
-      "insert into funnels (id, tenant_id, name, slug, trigger_type, product_id, deadline_hours, is_active, created_at) values (?, ?, ?, ?, 'purchase', ?, ?, ?, ?)",
+      "insert into funnels (id, tenant_id, name, slug, trigger_type, product_id, deadline_hours, is_active, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
       opts.funnelId,
       opts.tenantId,
       "funnel",
       `${opts.tenantId}-${opts.funnelId}`,
+      opts.funnelTriggerType ?? "purchase",
       opts.funnelProductId ?? opts.productId,
       opts.deadlineHours ?? 72,
       opts.funnelActive === false ? 0 : 1,
@@ -155,6 +158,12 @@ test("フル経路: ラベル付与・シナリオ登録・配信キュー投入
   >;
   assert.equal(label.label_id, "label-1");
 
+  const purchase = db.prepare("select * from purchases where reader_id = ?").get(reader.id as string) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(purchase.amount, 1000, "paidAmount がそのまま purchases.amount に入る（レビュー 🟢-2）");
+
   const enrollment = db.prepare("select * from scenario_readers where reader_id = ?").get(reader.id as string) as Record<
     string,
     unknown
@@ -217,6 +226,17 @@ test("既存 reader は名前が無い時だけ埋める。トークンは上書
   );
   const reader2 = db.prepare("select * from readers where id = ?").get("reader-existing") as Record<string, unknown>;
   assert.equal(reader2.name, "New Name", "既存 name がある時は上書きしない（coalesce）");
+});
+
+test("buyerName が空文字列だと reader.name は null になる（Postgres版の nullif(buyer_name, '') 相当。レビュー 🟢-3）", async () => {
+  const { db, executor } = createDb();
+  seedTenant(db, { tenantId: "tenant-a", productId: "prod-1" });
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await processStripePurchase(tenantA, baseInput({ buyerName: "" }));
+
+  const reader = db.prepare("select * from readers where tenant_id = ?").get("tenant-a") as Record<string, unknown>;
+  assert.equal(reader.name, null, "空文字列は null 扱いにする（nullif 相当）");
 });
 
 test("product not found は例外を投げ、何も書き込まない", async () => {
@@ -418,6 +438,47 @@ test("funnels.product_id が別商品だと active purchase funnel not found に
   await assert.rejects(() => processStripePurchase(tenantA, baseInput()), ActivePurchaseFunnelNotFoundError);
 });
 
+test("funnels.trigger_type が 'purchase' でない（registration）と active purchase funnel not found になる（レビュー 🟡-B/trigger_type）", async () => {
+  const { db, executor } = createDb();
+  seedTenant(db, {
+    tenantId: "tenant-a",
+    productId: "prod-1",
+    scenarioId: "scenario-1",
+    funnelId: "funnel-1",
+    funnelTriggerType: "registration",
+  });
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await assert.rejects(() => processStripePurchase(tenantA, baseInput()), ActivePurchaseFunnelNotFoundError);
+});
+
+test("step_messages は同一テナントの別シナリオぶんを巻き込まない（レビュー 🟡-B/scenario_id）", async () => {
+  const { db, executor } = createDb();
+  seedTenant(db, {
+    tenantId: "tenant-a",
+    productId: "prod-1",
+    scenarioId: "scenario-1",
+    funnelId: "funnel-1",
+    stepMessages: [{ id: "step-1", delayMinutes: 0, sendAtHour: null }],
+  });
+  // 同一テナントの無関係な別シナリオ（scenario-2）に step_messages だけ仕込む。
+  // scenario_id の絞り込みが空振りしていると、これらの行まで deliveries に紛れ込む。
+  db.prepare(
+    "insert into scenarios (id, tenant_id, delivery_account_id, funnel_id, name, is_active, created_at) values (?, ?, ?, ?, ?, ?, ?)",
+  ).run("scenario-2", "tenant-a", "da-1", null, "scenario-2", 1, "2026-09-01T00:00:00.000Z");
+  for (const id of ["s2-step-1", "s2-step-2"]) {
+    db.prepare(
+      "insert into step_messages (id, tenant_id, scenario_id, position, delay_minutes, send_at_hour, subject, body, created_at) values (?, ?, ?, 0, 0, null, 's', 'b', ?)",
+    ).run(id, "tenant-a", "scenario-2", "2026-09-01T00:00:00.000Z");
+  }
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await processStripePurchase(tenantA, baseInput());
+
+  const deliveryCount = db.prepare("select count(*) as c from deliveries").get() as { c: number };
+  assert.equal(deliveryCount.c, 1, "scenario-1 の step_messages(1件)ぶんだけが積まれ、scenario-2 の分は混入しない");
+});
+
 test("既に同シナリオへ登録済みの読者が別セッションで再度この経路を通ると、配信予定時刻は既存の registered_at を基準にする（レビュー 🟡-6 / 🟡-4）", async () => {
   const { db, executor } = createDb();
   seedTenant(db, {
@@ -439,6 +500,17 @@ test("既に同シナリオへ登録済みの読者が別セッションで再�
     .get(reader.id as string) as Record<string, unknown>;
   assert.equal(enrollmentBefore.registered_at, "2026-08-01T00:00:00.000Z");
 
+  // レビュー 🟡-A: 1回目と同じ step-1 だけを使うと、2回目の deliveries insert は
+  // on conflict (scenario_reader_id, step_message_id) do nothing で常に無視される（=既存行が
+  // 1回目の scheduled_at のまま何もせず残るだけ）。そのため「2回目の呼び出しでどの registered_at を
+  // 使って計算したか」はこの delivery 行には一切反映されず、computeStepScheduledAt の第1引数を
+  // input.purchasedAt に戻してもこのテストは落ちない（空振り）。1回目の呼び出しの後に、
+  // まだ delivery が存在しない新しい step_message（step-2）を追加し、2回目の呼び出しで
+  // 初めて挿入される delivery を見ることで、2回目の呼び出し時点の計算結果を実際に検証する。
+  db.prepare(
+    "insert into step_messages (id, tenant_id, scenario_id, position, delay_minutes, send_at_hour, subject, body, created_at) values (?, ?, ?, 1, ?, ?, 's', 'b', ?)",
+  ).run("step-2", "tenant-a", "scenario-1", 30, null, "2026-08-15T00:00:00.000Z");
+
   // 2回目: 別の stripe_session_id で同じ商品を購入（同一 reader・同一 scenario への再エンロール）。
   // on conflict (reader_id, scenario_id) do update set reader_id = excluded.reader_id は
   // registered_at を更新しないため、Postgres版と同様「元の registered_at」が基準であるべき。
@@ -457,17 +529,31 @@ test("既に同シナリオへ登録済みの読者が別セッションで再�
   );
   assert.equal(enrollmentAfter.id, enrollmentBefore.id, "同じ scenario_readers 行が更新される（新規行ではない）");
 
-  // deliveries 側: 同じ (scenario_reader_id, step_message_id) への2回目の insert は
+  // step-1 側: 同じ (scenario_reader_id, step_message_id) への2回目の insert は
   // on conflict do nothing が無いと SQLite の UNIQUE 制約違反で例外になる（=このテスト自体が失敗する）。
-  const deliveryCount = db.prepare("select count(*) as c from deliveries").get() as { c: number };
-  assert.equal(deliveryCount.c, 1, "on conflict do nothing で2回目は増えない");
-  const delivery = db
-    .prepare("select * from deliveries where scenario_reader_id = ?")
+  const step1Delivery = db
+    .prepare("select * from deliveries where scenario_reader_id = ? and step_message_id = 'step-1'")
     .get(enrollmentAfter.id as string) as Record<string, unknown>;
+  const step1Count = db
+    .prepare("select count(*) as c from deliveries where step_message_id = 'step-1'")
+    .get() as { c: number };
+  assert.equal(step1Count.c, 1, "on conflict do nothing で2回目は増えない");
   assert.equal(
-    delivery.scheduled_at,
+    step1Delivery.scheduled_at,
     "2026-08-01T00:00:00.000Z",
-    "配信予定時刻は既存の registered_at 基準（2回目の purchasedAt ではない）",
+    "1回目の insert 時点の値のまま（on conflict do nothing で2回目は触られない）",
+  );
+
+  // step-2 側（レビュー 🟡-A 本体）: 2回目の呼び出しで初めて挿入される行なので、
+  // 2回目の呼び出し時点でどの registered_at を基準に計算したかがここに直接反映される。
+  const step2Delivery = db
+    .prepare("select * from deliveries where scenario_reader_id = ? and step_message_id = 'step-2'")
+    .get(enrollmentAfter.id as string) as Record<string, unknown>;
+  assert.ok(step2Delivery, "2回目の呼び出しで新しい step_message ぶんの delivery が新規挿入される");
+  assert.equal(
+    step2Delivery.scheduled_at,
+    "2026-08-01T00:30:00.000Z",
+    "配信予定時刻は既存の registered_at(2026-08-01) 基準（2回目の purchasedAt ではない）",
   );
 });
 

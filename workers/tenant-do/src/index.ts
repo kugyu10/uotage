@@ -28,6 +28,13 @@
  *   同一テナントへの同時呼び出しを直列化している（公式ドキュメントが
  *   「外部 async 呼び出し中の状態変化を許容できない場合」の用途として挙げている使い方）。
  *
+ * 注意（レビュー 🟢-4）: `ctx.blockConcurrencyWhile()` のコールバックには
+ * **30秒のタイムアウト**があり、超えると DO 自体がリセットされる
+ * （公式 https://developers.cloudflare.com/durable-objects/api/state/ 「there is a
+ * 30 second timeout applied when executing the callback」）。deliveries 一括insertは
+ * ステップ数に比例してチャンク数が線形に増える（process-stripe-purchase.ts 参照）ため、
+ * 将来このコールバックの中に重い処理を足すときはこの制限を意識すること。
+ *
  * 未検証（このIssueの作業時点。UAT 集約Issue #13 へ）:
  *   - 実際の Cloudflare 環境での DO 作成・D1 バインディングの疎通
  *   - 実機で blockConcurrencyWhile が意図通り同時リクエストを直列化していること
