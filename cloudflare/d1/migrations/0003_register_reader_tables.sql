@@ -32,3 +32,12 @@ create table registration_paths (
   created_at text not null,
   unique (tenant_id, funnel_id, path)
 );
+
+-- register_reader が登録1件ごとに引く2つの検索に索引を足す（レビュー指摘 🟢-3）。
+-- registration_paths 自体は unique (tenant_id, funnel_id, path) が検索条件を
+-- そのまま覆っているため追加不要。
+--   - purchases where tenant_id = ? and reader_id = ? （購入済みスキップ判定）
+--   - scenarios where tenant_id = ? and funnel_id = ? and is_active = 1
+--     order by created_at, id （アクティブシナリオの解決）
+create index purchases_tenant_reader_idx on purchases (tenant_id, reader_id);
+create index scenarios_tenant_funnel_active_idx on scenarios (tenant_id, funnel_id, is_active);

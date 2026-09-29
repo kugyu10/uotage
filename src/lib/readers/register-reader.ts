@@ -183,6 +183,14 @@ export class RegistrationPathNotFoundError extends Error {
  *     このとき subject 等は返さない（呼び出し側は送信せず、通常の配信バッチに委ねる）。
  */
 export async function registerReader(db: TenantDb, input: RegisterReaderInput): Promise<RegisterReaderResult> {
+  // input.now は呼び出し側任せの文字列表記だが、クールダウン判定(下記)は
+  // `coalesce(sent_at, scheduled_at) <= ?` という**文字列比較**に依存する。
+  // toISOString() で必ず "...Z" 形式へ正規化しておかないと、等価だが表記の異なる
+  // 値（例: +09:00 オフセット表記）を渡されたときに比較が破綻する（レビュー指摘 🟢-4）。
+  // 不正な形式なら Date が Invalid Date になり toISOString() が例外を投げるので、
+  // 早期に落ちる（後続の書き込みは発生しない）。
+  const now = new Date(input.now).toISOString();
+
   // --- 読む・判断するフェーズ。ここでの例外は何も書き込む前に発生する。 ---
   const funnel = await db.get<FunnelRow>(
     `select id, slug, product_id, deadline_hours from funnels
@@ -219,7 +227,8 @@ export async function registerReader(db: TenantDb, input: RegisterReaderInput): 
   );
 
   const steps = await db.all<StepRow>(
-    "select id, delay_minutes, send_at_hour from step_messages where tenant_id = :tenant and scenario_id = ?",
+    `select id, delay_minutes, send_at_hour from step_messages
+     where tenant_id = :tenant and scenario_id = ? order by position, id`,
     [scenario.id],
   );
 
@@ -233,7 +242,7 @@ export async function registerReader(db: TenantDb, input: RegisterReaderInput): 
      values (?, :tenant, ?, ?, ?, ?, ?)
      on conflict (tenant_id, email) do update set name = coalesce(readers.name, excluded.name)
      returning id, email, name, access_token, unsubscribe_token, unsubscribed_at`,
-    [crypto.randomUUID(), normalizedEmail, normalizedName, input.accessToken, input.unsubscribeToken, input.now],
+    [crypto.randomUUID(), normalizedEmail, normalizedName, input.accessToken, input.unsubscribeToken, now],
   );
   if (!reader) throw new Error("reader upsert did not return a row");
 
@@ -243,13 +252,13 @@ export async function registerReader(db: TenantDb, input: RegisterReaderInput): 
   );
   const hadEnrollment = existingEnrollment !== undefined;
 
-  const deadlineAt = addHoursIso(input.now, funnel.deadline_hours);
+  const deadlineAt = addHoursIso(now, funnel.deadline_hours);
   const enrollment = await db.get<EnrollmentRow>(
     `insert into scenario_readers (id, tenant_id, reader_id, scenario_id, registration_path, registered_at, deadline_at)
      values (?, :tenant, ?, ?, ?, ?, ?)
      on conflict (reader_id, scenario_id) do update set reader_id = excluded.reader_id
      returning id, registered_at, deadline_at`,
-    [crypto.randomUUID(), reader.id, scenario.id, input.registrationPath, input.now, deadlineAt],
+    [crypto.randomUUID(), reader.id, scenario.id, input.registrationPath, now, deadlineAt],
   );
   if (!enrollment) throw new Error("scenario_readers upsert did not return a row");
 
@@ -258,7 +267,7 @@ export async function registerReader(db: TenantDb, input: RegisterReaderInput): 
       `insert into reader_labels (tenant_id, reader_id, label_id, granted_at)
        values (:tenant, ?, ?, ?)
        on conflict (reader_id, label_id) do nothing`,
-      [reader.id, pathLabelId, input.now],
+      [reader.id, pathLabelId, now],
     );
   }
 
@@ -316,13 +325,13 @@ export async function registerReader(db: TenantDb, input: RegisterReaderInput): 
     // 送信条件フィルタと排他制御を持つ配信ワーカーだけが送信する。送信中(processing)の
     // 行には触れない。直近の送信/予約から RESEND_COOLDOWN_MS 未満なら積み直さない(連投抑止)。
     if (hadEnrollment && initialStep) {
-      const cooldownBoundary = new Date(new Date(input.now).getTime() - RESEND_COOLDOWN_MS).toISOString();
+      const cooldownBoundary = new Date(new Date(now).getTime() - RESEND_COOLDOWN_MS).toISOString();
       await db.run(
         `update deliveries set status = 'queued', scheduled_at = ?, processing_started_at = null, error_message = null
          where tenant_id = :tenant and scenario_reader_id = ? and step_message_id = ?
            and status in ('sent', 'queued', 'failed', 'skipped')
            and coalesce(sent_at, scheduled_at) <= ?`,
-        [input.now, enrollment.id, initialStep.id, cooldownBoundary],
+        [now, enrollment.id, initialStep.id, cooldownBoundary],
       );
     }
   }
