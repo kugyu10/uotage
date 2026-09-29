@@ -9,10 +9,12 @@ issue #29 [移行 P5] ADR 方式A（`docs/移行P5-ADR-トランザクション�
 対応 Issue: [kugyu10/uotage#29](https://github.com/kugyu10/uotage/issues/29)
 
 > **このIssueで実装済みなのは `TenantDurableObject.processStripePurchase` /
-> `TenantDurableObject.registerReader` の2つ。**
-> `import_scenario_readers` 用のRPCメソッドは未実装（#29 の残タスク）。
-> ルート側 `wrangler.jsonc` からのクロスワーカーバインディング（`script_name`）だけを
-> 先に敷いてある。
+> `TenantDurableObject.registerReader` / `TenantDurableObject.importScenarioReaders` の3つ
+> （PL/pgSQL関数3本すべての移植が完了）。**
+> ただし呼び出し元（既存の Supabase RPC を呼んでいる Server Action /
+> `src/app/admin/mail/scenarios/[scenarioId]/import/actions.ts` 等）を D1 経由へ
+> 切り替える配線と、要件定義書 5.1・5.4・10.2 の改訂は別issueのスコープ
+> （#29 の残タスク）。
 
 > **直列化の実装**: DO の input/output gate は `ctx.storage` への操作しか自動で守らない
 > （D1 バインディングへの fetch は対象外。Cloudflare公式ドキュメントで確定）。そのため

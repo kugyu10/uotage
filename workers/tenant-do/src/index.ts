@@ -13,9 +13,6 @@
  * `idFromName` 以外（`newUniqueId` 等）で作った ID には対応していない
  * （`src/lib/d1/resolve-tenant-id.ts` の `resolveTenantIdFromDoName` が id.name を要求する）。
  *
- * 未実装（issue #29 の残タスク。import_scenario_readers の移植時に追加）:
- *   - importScenarioReaders RPC メソッド
- *
  * 直列化について（確定事項。レビュー 🔴-1 で判明）:
  *   DO の input/output gate は `ctx.storage`（DO 自身のストレージ）への操作しか自動で
  *   守らない。`env.DB`（D1 バインディング）への fetch は non-storage I/O のため gate の
@@ -46,6 +43,11 @@ import { runProcessStripePurchaseRpc, type RpcResult } from "../../../src/lib/d1
 import type { ProcessStripePurchaseInput } from "../../../src/lib/purchases/process-stripe-purchase.ts";
 import { runRegisterReaderRpc, type RegisterReaderRpcResult } from "../../../src/lib/d1/register-reader-rpc.ts";
 import type { RegisterReaderInput } from "../../../src/lib/readers/register-reader.ts";
+import {
+  runImportScenarioReadersRpc,
+  type ImportScenarioReadersRpcResult,
+} from "../../../src/lib/d1/import-scenario-readers-rpc.ts";
+import type { ImportScenarioReadersInput } from "../../../src/lib/readers/import-scenario-readers.ts";
 
 // tenant-db.ts はこの型を export していない（変更禁止 — #25/#28 で塞いだガードの
 // 対象ファイル。呼び出すだけに留める）ため、D1Executor のメソッドシグネチャから
@@ -117,6 +119,23 @@ export class TenantDurableObject extends DurableObject<Env> {
   async registerReader(input: RegisterReaderInput): Promise<RegisterReaderRpcResult> {
     return this.ctx.blockConcurrencyWhile(() =>
       runRegisterReaderRpc(createD1Executor(this.env.DB), this.ctx.id.name, input),
+    );
+  }
+
+  /**
+   * import_scenario_readers の移植版を、このテナントのDOの中で実行する。
+   * RPC (Workers RPC) として呼び出す想定:
+   * `env.TENANT_DO.idFromName(tenantId).importScenarioReaders(input)`。
+   *
+   * processStripePurchase / registerReader と同じ構造（薄い糊 + blockConcurrencyWhile
+   * による直列化）。呼び出し側はCSVインポートの確定実行を IMPORT_BATCH_SIZE 件ずつに
+   * 分割し、この RPC を1バッチにつき1回呼ぶ想定
+   * （src/lib/readers/import-scenario-readers.ts のヘッダコメント参照。
+   * `input.executedAt` は全バッチで同一の値を渡すこと）。
+   */
+  async importScenarioReaders(input: ImportScenarioReadersInput): Promise<ImportScenarioReadersRpcResult> {
+    return this.ctx.blockConcurrencyWhile(() =>
+      runImportScenarioReadersRpc(createD1Executor(this.env.DB), this.ctx.id.name, input),
     );
   }
 }
