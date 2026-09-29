@@ -108,11 +108,11 @@ function seedTenant(
 
 function seedRegistrationPath(
   db: DatabaseSync,
-  opts: { tenantId: string; funnelId: string; path: string; labelId?: string | null },
+  opts: { tenantId: string; funnelId: string; path: string; labelId?: string | null; id?: string },
 ) {
   db.prepare(
     "insert into registration_paths (id, tenant_id, funnel_id, path, name, label_id, created_at) values (?, ?, ?, ?, ?, ?, ?)",
-  ).run(`rp-${opts.path}`, opts.tenantId, opts.funnelId, opts.path, opts.path, opts.labelId ?? null, NOW);
+  ).run(opts.id ?? `rp-${opts.funnelId}-${opts.path}`, opts.tenantId, opts.funnelId, opts.path, opts.path, opts.labelId ?? null, NOW);
 }
 
 function baseInput(overrides: Partial<RegisterReaderInput> = {}): RegisterReaderInput {
@@ -166,6 +166,11 @@ test("最小ケース: 1ステップのシナリオへ新規登録し、1通目�
   assert.equal(deliveries[0].status, "processing", "1通目は即時送信前提の processing");
   assert.equal(deliveries[0].error_message, null);
   assert.equal(deliveries[1].status, "queued", "2通目以降は queued");
+  // レビュー指摘 🟡-5: deliveries.reader_id(配信ワーカーが宛先を引く列)が
+  // これまで一度も検証されておらず、enrollment.id(別テーブルのUUID)を誤って
+  // 入れても検知できなかった。個人情報の誤送信に直結する列なので明示的に確認する。
+  assert.equal(deliveries[0].reader_id, reader.id, "deliveries.reader_id は readers.id(enrollment.id ではない)");
+  assert.equal(deliveries[1].reader_id, reader.id, "2通目以降も同じ reader.id が入る");
 
   assert.equal(result.email, "reader@example.com");
   assert.equal(result.funnelSlug, "funnel-a");
@@ -197,6 +202,7 @@ test("registration_path が指定され登録経路にラベルがあれば read
     unknown
   >;
   assert.equal(label.label_id, "label-line");
+  assert.equal(label.granted_at, "2026-09-14T03:00:00.000Z", "1回目登録時の granted_at");
 
   const enrollment = db.prepare("select * from scenario_readers where reader_id = ?").get(reader.id as string) as Record<
     string,
@@ -212,6 +218,62 @@ test("registration_path が指定され登録経路にラベルがあれば read
     reader.id as string,
   ) as { c: number };
   assert.equal(labelCount.c, 1, "2回目の登録でも reader_labels は増えない(二重付与防止)");
+
+  // レビュー指摘 🟢-5: on conflict do nothing を do update set granted_at = excluded.granted_at
+  // に変えても、上のアサーションだけでは検知できない(件数は変わらないため)。
+  // 2回目登録後も granted_at が1回目の値のまま(最初にラベルが付いた日時が保たれる)ことを確認する。
+  const labelAfterSecondCall = db
+    .prepare("select * from reader_labels where reader_id = ?")
+    .get(reader.id as string) as Record<string, unknown>;
+  assert.equal(
+    labelAfterSecondCall.granted_at,
+    "2026-09-14T03:00:00.000Z",
+    "2回目登録(03:05)後も granted_at は1回目(03:00)のまま(do nothing なので上書きされない)",
+  );
+});
+
+test("registration_paths 検索は funnel_id / path で絞られ、他のパスや他ファネルの同名パスを巻き込まない", async () => {
+  // レビュー指摘 🟢-1: registration_paths 検索の funnel_id / path の絞りが、
+  // 候補行が1行しか無いフィクスチャでは無検証だった。同一ファネルに複数パス、
+  // 別ファネルに同名パスを置き、絞りが効いていることを確認する。
+  const { db, executor } = createDb();
+  seedTenant(db, {
+    tenantId: "tenant-a",
+    funnelId: "funnel-1",
+    funnelSlug: "funnel-a",
+    scenarioId: "scenario-1",
+    stepMessages: [{ id: "step-1", position: 0, delayMinutes: 0, sendAtHour: null }],
+  });
+  // 別ファネル(funnel_id が対象より辞書順で先)に同じ path 名(lp-a)だが違うラベルを持つ
+  // 行を置く。SQLite は (tenant_id, funnel_id, path) の unique 索引を使ってスキャンするため、
+  // funnel_id の絞りを外すと索引順(funnel_id 昇順)で最初に見つかった行が返る。
+  // 対象ファネル("funnel-1")より辞書順で前の funnel_id("funnel-0")に決め行きを置くことで、
+  // 「たまたま正しい行が先に見つかる」形での空振りを避ける。
+  db.prepare(
+    "insert into funnels (id, tenant_id, name, slug, trigger_type, product_id, deadline_hours, is_active, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run("funnel-0", "tenant-a", "funnel0", "funnel-0", "registration", null, 72, 1, NOW);
+  seedRegistrationPath(db, { tenantId: "tenant-a", funnelId: "funnel-0", path: "lp-a", labelId: "label-x" });
+  // funnel-0 側にも問い合わせる path("lp-b")と同名の行を置く。funnel_id の絞りが
+  // 外れると、path だけの一致では funnel-0(索引順で先)の行が拾われてしまう。
+  seedRegistrationPath(db, { tenantId: "tenant-a", funnelId: "funnel-0", path: "lp-b", labelId: "label-y" });
+  // 対象ファネル(funnel-1)内に2パス。問い合わせる "lp-b" より辞書順で前の "lp-a" を
+  // 決め行きとして同居させることで、path の絞りが外れても索引順で "lp-a" 側(label-a)が
+  // 先に見つかり、期待する "lp-b"(label-b) との食い違いとして検知できるようにする。
+  seedRegistrationPath(db, { tenantId: "tenant-a", funnelId: "funnel-1", path: "lp-a", labelId: "label-a" });
+  seedRegistrationPath(db, { tenantId: "tenant-a", funnelId: "funnel-1", path: "lp-b", labelId: "label-b" });
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await registerReader(tenantA, baseInput({ registrationPath: "lp-b" }));
+
+  const reader = db.prepare("select * from readers where tenant_id = 'tenant-a'").get() as Record<string, unknown>;
+  const labels = db.prepare("select label_id from reader_labels where reader_id = ?").all(reader.id as string) as Array<{
+    label_id: string;
+  }>;
+  assert.deepEqual(
+    labels.map((l) => l.label_id),
+    ["label-b"],
+    "path の絞りが効いていれば同じファネル内の label-a は付与されず、funnel_id の絞りが効いていれば別ファネル(funnel-0)の label-x でもない",
+  );
 });
 
 test("registration_path が登録済みだがラベルが無い場合は reader_labels に何も積まない", async () => {
@@ -327,6 +389,48 @@ test("同一ファネルに複数の active シナリオがあれば created_at,
   >;
   assert.equal(enrollment.scenario_id, "scenario-earlier", "作成日時が先の(=id昇順以前ではなくcreated_at昇順の)シナリオを選ぶ");
   assert.equal(result.subject, "s", "選ばれたシナリオ(scenario-earlier)の1通目(手動insertした 's')が返る");
+});
+
+test("scenarios 検索の funnel_id 絞りが効き、別ファネルの(より古い)active シナリオを巻き込まない", async () => {
+  // レビュー指摘 🟡-4(ラウンド3): scenarios 検索の `funnel_id = ?` を無効化しても、
+  // 既存テストは同一ファネル内の複数シナリオしか作っていないため落ちない(空振り)。
+  // この絞りが落ちると、どのファネルの LP から登録してもテナント内で最も古い active
+  // シナリオに登録され、読者は申し込んだ講座と別のステップメールを受け取る。
+  // 同一テナントに2ファネルを作り、対象外ファネルのシナリオを意図的に古くする
+  // (`order by created_at` で先に来るようにして、絞りが落ちたら確実に選ばれるようにする)。
+  const { db, executor } = createDb();
+  seedTenant(db, {
+    tenantId: "tenant-a",
+    funnelId: "funnel-1",
+    funnelSlug: "funnel-a",
+    scenarioId: "scenario-1",
+    stepMessages: [{ id: "step-a1", position: 0, delayMinutes: 0, sendAtHour: null, subject: "Aの1通目" }],
+  });
+  // funnel-2(slug funnel-b)。scenario-2 の created_at を scenario-1 より古くする。
+  db.prepare(
+    "insert into funnels (id, tenant_id, name, slug, trigger_type, product_id, deadline_hours, is_active, created_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run("funnel-2", "tenant-a", "funnel2", "funnel-b", "registration", null, 72, 1, NOW);
+  db.prepare(
+    "insert into scenarios (id, tenant_id, delivery_account_id, funnel_id, name, is_active, created_at) values (?, ?, ?, ?, ?, ?, ?)",
+  ).run("scenario-2", "tenant-a", "da-1", "funnel-2", "scenario2", 1, "2020-01-01T00:00:00.000Z");
+  db.prepare(
+    "insert into step_messages (id, tenant_id, scenario_id, position, delay_minutes, send_at_hour, subject, body, created_at) values (?, ?, ?, 0, 0, null, ?, 'b', ?)",
+  ).run("step-b1", "tenant-a", "scenario-2", "Bの1通目", NOW);
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  const result = await registerReader(tenantA, baseInput({ funnelSlug: "funnel-a" }));
+
+  assert.equal(result.subject, "Aの1通目", "funnel_id で絞られていれば、より古い別ファネル(funnel-b)のシナリオは選ばれない");
+  const reader = db.prepare("select * from readers where tenant_id = 'tenant-a'").get() as Record<string, unknown>;
+  const enrollment = db.prepare("select * from scenario_readers where reader_id = ?").get(reader.id as string) as Record<
+    string,
+    unknown
+  >;
+  assert.equal(enrollment.scenario_id, "scenario-1", "登録先は funnel-a のシナリオであること");
+  const scenario2DeliveryCount = db
+    .prepare("select count(*) as c from deliveries where scenario_reader_id in (select id from scenario_readers where scenario_id = 'scenario-2')")
+    .get() as { c: number };
+  assert.equal(scenario2DeliveryCount.c, 0, "funnel-b(scenario-2)側には何も積まれない");
 });
 
 test("既存 reader は名前が無い時だけ埋める。トークンは上書きしない", async () => {
@@ -506,6 +610,53 @@ test("funnel.product_id が指定されているとき、別商品の購入だ�
   assert.equal(result.subject, "件名", "スキップ対象でないので即時送信を返す");
 });
 
+test("購入済みスキップの判定は購入した本人だけに効く(reader_id の絞り込み)", async () => {
+  // レビュー指摘 🟡-3(ラウンド3): purchases 検索の `reader_id = ?` を無効化しても、
+  // 既存テストは「購入した本人が登録する」フィクスチャしか無いため落ちない(空振り)。
+  // この絞りが落ちると、テナント内の誰か1人が対象商品を買った時点で、
+  // 以後そのファネルに登録する全読者の1通目が黙って skipped になる(実害の大きい事故)。
+  // 別の読者(購入なし)が登録しても、その読者の1通目はスキップされないことを確認する。
+  const { db, executor } = createDb();
+  seedTenant(db, {
+    tenantId: "tenant-a",
+    funnelId: "funnel-1",
+    funnelSlug: "funnel-a",
+    scenarioId: "scenario-1",
+    funnelProductId: "prod-1",
+    stepMessages: [{ id: "step-1", position: 0, delayMinutes: 0, sendAtHour: null, skipIfPurchased: true }],
+  });
+  db.prepare(
+    "insert into products (id, tenant_id, name, stripe_price_id, created_at) values (?, ?, ?, ?, ?)",
+  ).run("prod-1", "tenant-a", "product", "price_x", NOW);
+  db.prepare(
+    "insert into readers (id, tenant_id, email, name, access_token, unsubscribe_token, created_at) values (?, ?, ?, ?, ?, ?, ?)",
+  ).run("reader-buyer", "tenant-a", "buyer@example.com", null, "old-access", "old-unsub", "2026-01-01T00:00:00.000Z");
+  db.prepare(
+    "insert into purchases (id, tenant_id, reader_id, product_id, stripe_session_id, purchased_at) values (?, ?, ?, ?, ?, ?)",
+  ).run("purchase-1", "tenant-a", "reader-buyer", "prod-1", "sess-1", "2026-01-02T00:00:00.000Z");
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  // 購入していない別の読者(reader-other相当)が同じファネルに登録する。
+  const result = await registerReader(tenantA, baseInput({ email: "other@example.com" }));
+
+  const otherReader = db.prepare("select * from readers where email = 'other@example.com'").get() as Record<
+    string,
+    unknown
+  >;
+  const otherEnrollment = db.prepare("select * from scenario_readers where reader_id = ?").get(
+    otherReader.id as string,
+  ) as Record<string, unknown>;
+  const otherDelivery = db
+    .prepare("select * from deliveries where scenario_reader_id = ? and step_message_id = 'step-1'")
+    .get(otherEnrollment.id as string) as Record<string, unknown>;
+  assert.equal(
+    otherDelivery.status,
+    "processing",
+    "reader_id で絞られていれば、他人(reader-buyer)の購入は無関係。この読者は買っていないのでスキップされない",
+  );
+  assert.equal(result.subject, "件名", "スキップ対象でないので即時送信を返す");
+});
+
 test("skip_if_purchased=0 のステップは、購入済みでもスキップされない", async () => {
   // レビュー指摘 🟡-3(2): initialStep.skip_if_purchased === 1 の判定自体(U9)が
   // 常時有効になっても、既存テストはどちらも skipIfPurchased: true しか使っていないため
@@ -565,8 +716,12 @@ test("initialStep の選定: delay_minutes>0 しか無いシナリオでは1通�
 });
 
 test("initialStep の選定: delay_minutes=0 のステップが複数あれば position, id の昇順で最初の1件を選ぶ", async () => {
-  // レビュー指摘 🟡-4(2): initialStep 検索の `order by position, id` が無検証。
-  // insert 順(position 1 が先)と position 順(position 0 が先)をわざとずらす。
+  // レビュー指摘 🟡-4(2)/🟡-2(ラウンド3): initialStep 検索の `order by position, id` が
+  // 無検証。前回のフィクスチャは id を "step-earlier"(position0) / "step-later"(position1)
+  // と名付けたため、id 昇順で並べても(= position を無視しても)同じ行が選ばれてしまい、
+  // 実際には「id 昇順で選んでいる」ことしか固定されていなかった(空振り)。
+  // id 順と position 順が**逆**になるように付け替え、position 昇順でしか
+  // result.subject === "position0の件名" が成立しないようにする。
   const { db, executor } = createDb();
   seedTenant(db, {
     tenantId: "tenant-a",
@@ -574,15 +729,21 @@ test("initialStep の選定: delay_minutes=0 のステップが複数あれば p
     funnelSlug: "funnel-a",
     scenarioId: "scenario-1",
     stepMessages: [
-      { id: "step-later", position: 1, delayMinutes: 0, sendAtHour: null, subject: "position1の件名" },
-      { id: "step-earlier", position: 0, delayMinutes: 0, sendAtHour: null, subject: "position0の件名" },
+      // insert 順: step-a が先。id 順: step-a が先。position 順: step-b(position0) が先。
+      // 3つとも一致しないように、id 順と position 順をわざと逆にする。
+      { id: "step-a", position: 1, delayMinutes: 0, sendAtHour: null, subject: "position1の件名" },
+      { id: "step-b", position: 0, delayMinutes: 0, sendAtHour: null, subject: "position0の件名" },
     ],
   });
   const tenantA = createTenantDb(executor, "tenant-a");
 
   const result = await registerReader(tenantA, baseInput());
 
-  assert.equal(result.subject, "position0の件名", "insert順ではなく position 昇順で最初の1件が選ばれる");
+  assert.equal(
+    result.subject,
+    "position0の件名",
+    "insert順(step-a が先)でも id 昇順(step-a < step-b)でもなく、position 昇順(step-b)で選ばれる",
+  );
 });
 
 test("initialStep の選定: 配列の先頭(steps[0])ではなく、delay_minutes=0 のIDそのものでprocessing化する行を決める", async () => {
@@ -725,6 +886,11 @@ test("再登録(10分以上経過): 送信中でない1通目を queued へ積�
   assert.equal(after.status, "queued", "10分以上経過していれば queued に積み直す(通常配信バッチが拾う)");
   assert.equal(after.processing_started_at, null, "積み直すときに古い processing_started_at をクリアする");
   assert.equal(after.error_message, null, "積み直すときに古い error_message をクリアする");
+  // レビュー指摘 🟢-3: requeue のパラメータ [now, ...] を [cooldownBoundary, ...] に
+  // 変えても、既存アサーションは status / processing_started_at / error_message しか
+  // 見ておらず無検証だった。実装コメント「1通目を queued + scheduled_at=now で積み直す」
+  // が実際に守られていることを確認する。
+  assert.equal(after.scheduled_at, "2026-09-14T03:15:00.000Z", "積み直し時の scheduled_at は再登録時刻(now)そのもの");
 });
 
 test("再登録(クールダウン内・processingではない): 10分未満は積み直さない(クールダウン境界自体を検証する)", async () => {
@@ -801,6 +967,38 @@ test("再登録(processingのまま・クールダウンは経過済み): 送信
   );
 });
 
+test("再登録(クールダウンちょうど10分): 境界は含む(<=)ので積み直される", async () => {
+  // レビュー指摘 🟢-2: `coalesce(sent_at, scheduled_at) <= ?` を `< ?` に変えても、
+  // 既存テストは5分後・15分後しか試しておらず、ちょうど10分の境界が無検証だった。
+  const { db, executor } = createDb();
+  seedTenant(db, {
+    tenantId: "tenant-a",
+    funnelId: "funnel-1",
+    funnelSlug: "funnel-a",
+    scenarioId: "scenario-1",
+    stepMessages: [{ id: "step-1", position: 0, delayMinutes: 0, sendAtHour: null }],
+  });
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  const first = await registerReader(tenantA, baseInput({ now: "2026-09-14T03:00:00.000Z" }));
+  const enrollment = db.prepare("select * from scenario_readers where reader_id = ?").get(first.readerId) as Record<
+    string,
+    unknown
+  >;
+  db.prepare("update deliveries set status = 'sent', sent_at = ? where scenario_reader_id = ?").run(
+    "2026-09-14T03:00:00.000Z",
+    enrollment.id as string,
+  );
+
+  // ちょうど10分後(cooldownBoundary と一致)に再登録。
+  await registerReader(tenantA, baseInput({ now: "2026-09-14T03:10:00.000Z" }));
+
+  const after = db
+    .prepare("select * from deliveries where scenario_reader_id = ? and step_message_id = 'step-1'")
+    .get(enrollment.id as string) as Record<string, unknown>;
+  assert.equal(after.status, "queued", "ちょうど10分は境界に含まれ(<=)積み直される");
+});
+
 test("再登録の再送キューは、絞り込み条件(scenario_reader_id / step_message_id)の範囲だけに効く", async () => {
   // レビュー指摘 🟡-2: requeue の scenario_reader_id / step_message_id の絞り込みは、
   // 既存テストが「1シナリオ・1ステップ・1読者」のフィクスチャしか使っていないため無検証。
@@ -858,6 +1056,16 @@ test("再登録の再送キューは、絞り込み条件(scenario_reader_id / s
   assert.ok(
     otherDeliveries.every((d) => d.status === "sent"),
     "scenario_reader_id の絞り込みが効いていれば reader-other の全ステップは触られない",
+  );
+  // レビュー指摘 🟡-5(補足): 複数読者のフィクスチャで、全行が同じ reader_id に
+  // なっていない(=読者ごとに正しく reader_id が振られている)ことも確認する。
+  assert.ok(
+    reader1Deliveries.every((d) => d.reader_id === reader1.readerId),
+    "reader1 の全 deliveries.reader_id は reader1 自身の readerId",
+  );
+  assert.ok(
+    otherDeliveries.every((d) => d.reader_id === other.readerId),
+    "reader-other の全 deliveries.reader_id は reader-other 自身の readerId(reader1のIDが混入していない)",
   );
 });
 
@@ -988,6 +1196,16 @@ test("steps 一覧は insert 順ではなく position, id の昇順で並ぶ(ord
     "queued",
     "position 1(2通目)は queued",
   );
+  // レビュー指摘 🟡-1: 上記2つのアサーションは isInitial 判定(initialStep という
+  // "別のクエリ"の order by)しか見ておらず、steps 一覧側(:229-233)の
+  // `order by position, id` を消しても通っていた(空振り)。deliveries の insert 順
+  // (= rowid 順 = steps 配列の順序そのもの)を直接見て、steps 一覧が position 昇順
+  // (insert 順の step-later, step-earlier ではない)であることを確認する。
+  assert.deepEqual(
+    deliveries.map((d) => d.step_message_id),
+    ["step-earlier", "step-later"],
+    "deliveries は steps の配列順(= position 昇順)で積まれる。insert 順(step-later が先)ではない",
+  );
 });
 
 test("email は trim もされる(前後の空白を除去してから小文字化)", async () => {
@@ -1108,6 +1326,29 @@ test("send_at_hour ありの配信予定時刻は process-stripe-purchase.ts と
     .all(enrollment.id as string) as Array<Record<string, unknown>>;
   assert.equal(deliveries[0].scheduled_at, "2026-09-14T03:00:00.000Z");
   assert.equal(deliveries[1].scheduled_at, "2026-09-14T00:00:00.000Z");
+});
+
+test("input.now が不正な形式なら例外を投げ、何も書き込まない(レビュー指摘 🟢-4)", async () => {
+  // `new Date(input.now).toISOString()` を try/catch で握り潰して input.now に
+  // フォールバックさせても、既存テストは正規化「する」ことしか見ておらず、
+  // 「不正な形式なら書き込み前に落ちる」は無検証だった。
+  const { db, executor } = createDb();
+  seedTenant(db, {
+    tenantId: "tenant-a",
+    funnelId: "funnel-1",
+    funnelSlug: "funnel-a",
+    scenarioId: "scenario-1",
+    stepMessages: [{ id: "step-1", position: 0, delayMinutes: 0, sendAtHour: null }],
+  });
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await assert.rejects(() => registerReader(tenantA, baseInput({ now: "not-a-date" })));
+
+  assert.equal(
+    (db.prepare("select count(*) as c from readers").get() as { c: number }).c,
+    0,
+    "不正な now は書き込み開始前(new Date(...).toISOString() の時点)で例外になり、reader は作られない",
+  );
 });
 
 test("input.now はオフセット表記でも UTC(...Z)へ正規化してから使う(レビュー指摘 🟢-4)", async () => {
