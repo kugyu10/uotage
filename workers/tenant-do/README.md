@@ -8,8 +8,9 @@ issue #29 [移行 P5] ADR 方式A（`docs/移行P5-ADR-トランザクション�
 
 対応 Issue: [kugyu10/uotage#29](https://github.com/kugyu10/uotage/issues/29)
 
-> **このIssueで実装済みなのは `TenantDurableObject.processStripePurchase` のみ。**
-> `register_reader` / `import_scenario_readers` 用のRPCメソッドは未実装（#29 の残タスク）。
+> **このIssueで実装済みなのは `TenantDurableObject.processStripePurchase` /
+> `TenantDurableObject.registerReader` の2つ。**
+> `import_scenario_readers` 用のRPCメソッドは未実装（#29 の残タスク）。
 > ルート側 `wrangler.jsonc` からのクロスワーカーバインディング（`script_name`）だけを
 > 先に敷いてある。
 

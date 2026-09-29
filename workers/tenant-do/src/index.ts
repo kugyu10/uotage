@@ -13,8 +13,7 @@
  * `idFromName` 以外（`newUniqueId` 等）で作った ID には対応していない
  * （`src/lib/d1/resolve-tenant-id.ts` の `resolveTenantIdFromDoName` が id.name を要求する）。
  *
- * 未実装（issue #29 の残タスク。register_reader / import_scenario_readers の移植時に追加）:
- *   - registerReader RPC メソッド
+ * 未実装（issue #29 の残タスク。import_scenario_readers の移植時に追加）:
  *   - importScenarioReaders RPC メソッド
  *
  * 直列化について（確定事項。レビュー 🔴-1 で判明）:
@@ -45,6 +44,8 @@ import { DurableObject } from "cloudflare:workers";
 import type { D1Executor } from "../../../src/lib/d1/tenant-db.ts";
 import { runProcessStripePurchaseRpc, type RpcResult } from "../../../src/lib/d1/process-stripe-purchase-rpc.ts";
 import type { ProcessStripePurchaseInput } from "../../../src/lib/purchases/process-stripe-purchase.ts";
+import { runRegisterReaderRpc, type RegisterReaderRpcResult } from "../../../src/lib/d1/register-reader-rpc.ts";
+import type { RegisterReaderInput } from "../../../src/lib/readers/register-reader.ts";
 
 // tenant-db.ts はこの型を export していない（変更禁止 — #25/#28 で塞いだガードの
 // 対象ファイル。呼び出すだけに留める）ため、D1Executor のメソッドシグネチャから
@@ -101,6 +102,21 @@ export class TenantDurableObject extends DurableObject<Env> {
   async processStripePurchase(input: ProcessStripePurchaseInput): Promise<RpcResult> {
     return this.ctx.blockConcurrencyWhile(() =>
       runProcessStripePurchaseRpc(createD1Executor(this.env.DB), this.ctx.id.name, input),
+    );
+  }
+
+  /**
+   * register_reader の移植版を、このテナントのDOの中で実行する。
+   * RPC (Workers RPC) として呼び出す想定: `env.TENANT_DO.idFromName(tenantId).registerReader(input)`。
+   *
+   * processStripePurchase と同じ構造（薄い糊 + blockConcurrencyWhile による直列化）。
+   * `registerReader` 自身は Resend を呼ばない（src/lib/readers/register-reader.ts の
+   * ヘッダコメント参照）。実際のメール送信は呼び出し側（このIssueのスコープ外）が
+   * `RegisterReaderRpcResult.result` の subject/body/initialDeliveryId を見て行う。
+   */
+  async registerReader(input: RegisterReaderInput): Promise<RegisterReaderRpcResult> {
+    return this.ctx.blockConcurrencyWhile(() =>
+      runRegisterReaderRpc(createD1Executor(this.env.DB), this.ctx.id.name, input),
     );
   }
 }

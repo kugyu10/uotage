@@ -128,6 +128,7 @@ create table scenario_readers (
 
 -- process_stripe_purchase が読む側だけに使う索引。
 -- readers はメールでの照合（tenant_id, email の UNIQUE 索引で足りる）以外に
--- 明示的な索引は不要なので追加しない（要件定義書 5.3 のトークン索引は
--- register_reader 移植 (#29 スコープ外) 側で使う想定のため、その移植時に足す）。
+-- 明示的な索引は不要（要件定義書 5.3 のトークン索引は access_token / unsubscribe_token
+-- の unique 制約が SQLite でそのまま索引を兼ねるため、register_reader 移植 (#29) 時点で
+-- 追加作業なしで満たされている。0003_register_reader_tables.sql 参照）。
 create index step_messages_scenario_idx on step_messages (tenant_id, scenario_id);
