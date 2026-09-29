@@ -64,6 +64,10 @@
  *      ため残した。TS の型 (`ImportDeliveryMode`) はコンパイル時にしか強制できず、
  *      JSON経由で外部から渡された不正な文字列を実行時に弾く必要がある
  *      （Postgres 版の SECURITY DEFINER 関数が担っていた役割と同じ）。
+ *   9. `email` の正規化に `.trim()` を追加した（Postgres 版には無い）。
+ *      process-stripe-purchase.ts の差分5と同じ理由: CSVの前後の空白混入に対する
+ *      安全側の追加であり、Postgres 版と同じ挙動に戻す（`.trim()` を外す）だけなら
+ *      欠陥ではない。
  */
 
 import type { TenantDb } from "../d1/tenant-db.ts";

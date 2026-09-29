@@ -137,6 +137,9 @@ test("新規readerを作成し、scenario_readersとdeliveriesを積む(delivery
   assert.equal(reader.email, "reader@example.com", "メールは小文字化される");
   assert.equal(reader.name, "読者太郎");
   assert.equal(reader.custom_fields, "{}");
+  assert.equal(reader.access_token, "access-1", "新規作成時はrowのaccessTokenがそのまま入る(取り違えていないか)");
+  assert.equal(reader.unsubscribe_token, "unsub-1", "新規作成時はrowのunsubscribeTokenがそのまま入る(取り違えていないか)");
+  assert.equal(reader.created_at, "2026-09-14T03:00:00.000Z", "readers.created_atはexecution_timeを明示的に入れる(差分7)");
 
   const enrollment = db.prepare("select * from scenario_readers where reader_id = ?").get(reader.id as string) as Record<
     string,
@@ -203,6 +206,43 @@ test("scenarioが同一テナントに存在しないと例外を投げる（別
 
   await assert.rejects(() => importScenarioReaders(tenantA, baseInput()), ImportScenarioNotFoundError);
   assert.equal(readers(db).length, 0);
+});
+
+test("同一テナントに複数のscenario/funnelがあっても id で正しく絞り込まれる(decoyを先に挿入)", async () => {
+  const { db, executor } = createDb();
+  // scenarios/funnels には (tenant_id, funnel_id, is_active) 等の複合索引があり、
+  // `id = ?` の絞り込みを外すと SQLite は挿入順ではなく索引キー(funnel_id/id の
+  // 文字列順)で行を返す。decoy 側の funnel_id を target ("funnel-1") より
+  // 辞書順で小さい "funnel-0-decoy" にすることで、絞り込みが外れたときに
+  // 真っ先にdecoyが返ってくる状況を作る(facts.mdの「decoy配置は索引順を意識する」)。
+  seedScenario(db, {
+    tenantId: "tenant-a",
+    scenarioId: "scenario-decoy",
+    funnelId: "funnel-0-decoy",
+    deadlineHours: 999,
+  });
+  seedScenario(db, {
+    tenantId: "tenant-a",
+    scenarioId: "scenario-1",
+    funnelId: "funnel-1",
+    deadlineHours: 48,
+    stepMessages: [{ id: "step-1", delayMinutes: 0, sendAtHour: null }],
+  });
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  const result = await importScenarioReaders(
+    tenantA,
+    baseInput({ scenarioId: "scenario-1", deliveryMode: "from_start", executedAt: "2026-09-14T03:00:00.000Z" }),
+  );
+
+  assert.equal(result.deliveriesQueued, 1, "targetシナリオのstepだけが積まれる(decoyのfunnelの999時間は使われない)");
+  const enrollment = db.prepare("select * from scenario_readers").get() as Record<string, unknown>;
+  assert.equal(enrollment.scenario_id, "scenario-1", "idの絞り込みが外れるとdecoyのscenarioに解決されうる");
+  assert.equal(
+    enrollment.deadline_at,
+    "2026-09-16T03:00:00.000Z",
+    "funnel-1(48時間)で計算される。funnel-0-decoy(999時間)ではない",
+  );
 });
 
 // ============================== readers upsert ==============================
@@ -326,22 +366,33 @@ test("別テナントに同一メールの既存readerがあっても巻き込�
 test("存在しないラベルは自動作成して付与し、既存ラベルは再利用する(重複作成しない)", async () => {
   const { db, executor } = createDb();
   seedScenario(db, { tenantId: "tenant-a", scenarioId: "scenario-1" });
+  // 索引順(name昇順)で「アラベル」<「新規ラベル」になるようにし、かつ
+  // decoyを先に挿入して rowid も「アラベル」の方が小さくなるようにする。
+  // `name = ?` の絞り込みが外れた場合、tenant-a の全ラベルを ORDER BY 無しで
+  // 取得したときに真っ先に返ってくるのが「アラベル」(既存・誤答)になるため、
+  // 「新規ラベル」の解決を壊すと必ず検出できる(facts.mdの「decoy配置は索引順を意識する」)。
   db.prepare("insert into labels (id, tenant_id, name, created_at) values (?, ?, ?, ?)").run(
     "label-existing",
     "tenant-a",
-    "既存ラベル",
+    "アラベル",
     NOW,
   );
   // decoy: 別テナントの同名ラベル。tenant-a側の解決に巻き込まれないこと。
   db.prepare("insert into labels (id, tenant_id, name, created_at) values (?, ?, ?, ?)").run(
     "label-tenant-b",
     "tenant-b",
-    "既存ラベル",
+    "アラベル",
     NOW,
   );
   const tenantA = createTenantDb(executor, "tenant-a");
 
-  await importScenarioReaders(tenantA, baseInput({ rows: [baseRow({ labels: ["既存ラベル", "新規ラベル", " "] })] }));
+  await importScenarioReaders(
+    tenantA,
+    baseInput({
+      executedAt: "2026-09-14T03:00:00.000Z",
+      rows: [baseRow({ labels: ["アラベル", "新規ラベル", " "] })],
+    }),
+  );
 
   const labelsInTenantA = db.prepare("select * from labels where tenant_id = 'tenant-a'").all() as Array<
     Record<string, unknown>
@@ -349,14 +400,27 @@ test("存在しないラベルは自動作成して付与し、既存ラベル�
   assert.equal(labelsInTenantA.length, 2, "既存ラベルは再利用され、新規ラベルだけ増える(空白のみの項目は無視)");
   assert.deepEqual(
     labelsInTenantA.map((l) => l.name).sort(),
-    ["新規ラベル", "既存ラベル"],
+    ["アラベル", "新規ラベル"],
+  );
+  const newLabel = labelsInTenantA.find((l) => l.name === "新規ラベル") as Record<string, unknown>;
+  assert.equal(
+    newLabel.created_at,
+    "2026-09-14T03:00:00.000Z",
+    "labels.created_atはexecution_timeを明示的に入れる(差分7)",
   );
 
   const reader = readers(db)[0];
-  const attached = db.prepare("select * from reader_labels where reader_id = ?").all(reader.id as string) as Array<
-    Record<string, unknown>
-  >;
+  const attached = db.prepare("select * from reader_labels where reader_id = ? order by label_id").all(
+    reader.id as string,
+  ) as Array<Record<string, unknown>>;
   assert.equal(attached.length, 2, "既存ラベルと新規ラベルの両方が付与される");
+  for (const row of attached) {
+    assert.equal(
+      row.granted_at,
+      "2026-09-14T03:00:00.000Z",
+      "reader_labels.granted_atはexecution_timeを明示的に入れる(差分7)",
+    );
+  }
 
   const labelsCountAll = db.prepare("select count(*) as c from labels").get() as { c: number };
   assert.equal(labelsCountAll.c, 3, "テナント境界を越えてラベルが再利用・複製されていない(既存2 + 新規1)");
@@ -385,6 +449,17 @@ test("registration_pathが空文字列ならnull扱いになる(nullif)", async 
 
   const enrollment = db.prepare("select * from scenario_readers").get() as Record<string, unknown>;
   assert.equal(enrollment.registration_path, null);
+});
+
+test("registration_pathが非空文字列ならそのまま保存される(nullに落ちていないか)", async () => {
+  const { db, executor } = createDb();
+  seedScenario(db, { tenantId: "tenant-a", scenarioId: "scenario-1" });
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  await importScenarioReaders(tenantA, baseInput({ rows: [baseRow({ registrationPath: "csv-import" })] }));
+
+  const enrollment = db.prepare("select * from scenario_readers").get() as Record<string, unknown>;
+  assert.equal(enrollment.registration_path, "csv-import");
 });
 
 // ============================== 冪等性(既に登録済み) ==============================
@@ -450,7 +525,13 @@ test("delivery_mode='none' は新規登録してもdeliveriesを一切積まな�
   seedScenario(db, {
     tenantId: "tenant-a",
     scenarioId: "scenario-1",
-    stepMessages: [{ id: "step-1", delayMinutes: 0, sendAtHour: null }],
+    stepMessages: [
+      { id: "step-1", delayMinutes: 0, sendAtHour: null },
+      // 'none' のガードが無くても、下流の時刻フィルタ(> executionTime)だけで0件を
+      // 作ってしまうケース(delay=0分)が偶然存在するため、そちらでは通過してしまう
+      // step(実行時刻より未来)を混ぜて、'none' ガード自体の効果を単独で検証する。
+      { id: "step-future", delayMinutes: 60 * 24, sendAtHour: null },
+    ],
   });
   const tenantA = createTenantDb(executor, "tenant-a");
 
@@ -462,16 +543,23 @@ test("delivery_mode='none' は新規登録してもdeliveriesを一切積まな�
   assert.equal(deliveryCount.c, 0);
 });
 
-test("delivery_mode='from_now' はregisteredAtを登録日時にし、実行時刻より過去のステップは積まない", async () => {
+test("delivery_mode='from_now' はregisteredAtを登録日時にし、実行時刻より過去のステップは積まない(境界を含む3本のステップで判別)", async () => {
   const { db, executor } = createDb();
   seedScenario(db, {
     tenantId: "tenant-a",
     scenarioId: "scenario-1",
-    // 過去日をregisteredAtに指定するケース。delay=0分のステップは registeredAt 基準なので
-    // 過去(実行時刻より前)になる想定。もう1本は数日先まで延びるステップにして「実行時刻より
-    // 未来」のケースを同時に混ぜる（decoyを1つだけにしない）。
+    // 過去日をregisteredAtに指定するケース。
+    // - step-past: delay=0分 → scheduledAt は registeredAt そのもの(= 09-01)。
+    // - step-between: registeredAtより後・実行時刻より前(09-06)。積まれてはいけない。
+    //   ここが無いと「フィルタの基準が registeredAt に化けている」バグ(境界の両側にしか
+    //   ステップが無いと検出できない)を見逃す。
+    // - step-boundary: scheduledAt が実行時刻とちょうど一致(09-14T03:00)。境界は`>`で
+    //   排他のはずなので積まれてはいけない(`>=`に緩んでいないかの検証)。
+    // - step-future: 実行時刻より後(09-21)。これだけが積まれる。
     stepMessages: [
-      { id: "step-past", delayMinutes: 0, sendAtHour: null },
+      { id: "step-past", delayMinutes: 0, sendAtHour: null }, // 09-01 (= registeredAt)
+      { id: "step-between", delayMinutes: 60 * 24 * 5, sendAtHour: null }, // 09-06
+      { id: "step-boundary", delayMinutes: 60 * 24 * 13 + 180, sendAtHour: null }, // 09-14T03:00 (= executedAt ちょうど)
       { id: "step-future", delayMinutes: 60 * 24 * 20, sendAtHour: null }, // +20日 (2026-09-01 + 20日 = 09-21)
     ],
   });
@@ -486,13 +574,83 @@ test("delivery_mode='from_now' はregisteredAtを登録日時にし、実行時�
     }),
   );
 
-  assert.equal(result.deliveriesQueued, 1, "実行時刻より未来のステップだけ積む");
+  assert.equal(result.deliveriesQueued, 1, "実行時刻より未来のステップだけ積む(registeredAt基準に化けていないか)");
   const enrollment = db.prepare("select * from scenario_readers").get() as Record<string, unknown>;
   assert.equal(enrollment.registered_at, "2026-09-01T00:00:00.000Z", "from_nowは指定日時を登録日時にする");
 
   const queued = db.prepare("select * from deliveries").all() as Array<Record<string, unknown>>;
-  assert.equal(queued.length, 1);
-  assert.equal(queued[0].step_message_id, "step-future");
+  assert.deepEqual(
+    queued.map((r) => r.step_message_id),
+    ["step-future"],
+    "積まれるのはstep-futureのみ(step-between/step-boundaryが混ざっていないか)",
+  );
+});
+
+test("deliveriesの行全体(reader_id/scenario_reader_id/scheduled_at)とdeadline_atの基準を具体値で検証する", async () => {
+  const { db, executor } = createDb();
+  seedScenario(db, {
+    tenantId: "tenant-a",
+    scenarioId: "scenario-1",
+    funnelId: "funnel-1",
+    deadlineHours: 48,
+    stepMessages: [
+      // send_at_hour が null: scheduledAt はそのまま registered_at + delay_minutes。
+      { id: "step-null-hour", delayMinutes: 60 * 24 * 19, sendAtHour: null }, // 09-01 + 19日 = 09-20T00:00:00Z
+      // send_at_hour = 9: JST日付の09:00に丸められる。base(registered_at+delay)は
+      // 09-21T03:00:00Z(JSTでは12:00)で09:00ちょうどではないため、丸めていることが
+      // 具体値の違いとして検出できる。
+      { id: "step-9-hour", delayMinutes: 60 * 24 * 20 + 180, sendAtHour: 9 }, // base = 09-21T03:00:00Z
+    ],
+  });
+  const tenantA = createTenantDb(executor, "tenant-a");
+
+  const result = await importScenarioReaders(
+    tenantA,
+    baseInput({
+      deliveryMode: "from_now",
+      registeredAt: "2026-09-01T00:00:00.000Z",
+      executedAt: "2026-09-14T03:00:00.000Z",
+    }),
+  );
+
+  assert.equal(result.deliveriesQueued, 2);
+
+  const enrollment = db.prepare("select * from scenario_readers").get() as Record<string, unknown>;
+  assert.equal(
+    enrollment.deadline_at,
+    "2026-09-03T00:00:00.000Z",
+    "deadline_atはregistered_at(from_nowの指定日時)+48時間。executedAt+48時間ではない",
+  );
+
+  const reader = readers(db)[0];
+  const queued = db.prepare("select * from deliveries order by step_message_id").all() as Array<Record<string, unknown>>;
+  assert.deepEqual(
+    queued.map((r) => r.step_message_id),
+    ["step-9-hour", "step-null-hour"],
+  );
+  for (const row of queued) {
+    assert.equal(row.reader_id, reader.id, "reader_idが正しい読者を指しているか(enrollment.idと取り違えていないか)");
+    assert.equal(
+      row.scenario_reader_id,
+      enrollment.id,
+      "scenario_reader_idが正しいenrollmentを指しているか(reader.idと取り違えていないか)",
+    );
+    assert.equal(row.status, "queued");
+  }
+
+  const nullHourRow = queued.find((r) => r.step_message_id === "step-null-hour") as Record<string, unknown>;
+  assert.equal(
+    nullHourRow.scheduled_at,
+    "2026-09-20T00:00:00.000Z",
+    "send_at_hourがnullならregistered_at+delay_minutesそのまま",
+  );
+
+  const hour9Row = queued.find((r) => r.step_message_id === "step-9-hour") as Record<string, unknown>;
+  assert.equal(
+    hour9Row.scheduled_at,
+    "2026-09-21T00:00:00.000Z",
+    "send_at_hour=9はJST日付の09:00(UTCでは00:00)に丸められる",
+  );
 });
 
 test("delivery_mode='from_start' は過去日になるステップも含めて全ステップ積む", async () => {
