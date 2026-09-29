@@ -1,0 +1,56 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // issue #29 [移行 P5] ADR 方式A: テナント単位の Durable Object。
+  // 3関数（register_reader / process_stripe_purchase / import_scenario_readers）の
+  // 書き込みをテナントごとに直列化する。DOはシングルスレッドなので、同一テナントに
+  // 対する「読む→判断する→書く」の間に他の書き込みが割り込まない
+  // （Postgres の FOR UPDATE 相当）。docs/移行P5-ADR-トランザクション設計.md 参照。
+  //
+  // このIssueで実装済みなのは process_stripe_purchase の RPC メソッドのみ
+  // （TenantDurableObject.processStripePurchase）。register_reader /
+  // import_scenario_readers 用のメソッドは未実装（issue #29 の残タスク）。
+  "name": "uotage-tenant-do",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-02",
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        // このワーカー自身は TenantDurableObject クラスを export するだけで、
+        // 自分から自分を呼ぶことは無いためこのバインディングは現状未使用。
+        // 「migrations でクラスを宣言するにはこのワーカー自身の wrangler.jsonc に
+        // 対応する binding が要る」という前提で置いているが、これは未検証の推測
+        // （レビュー 🟢-5）。Cloudflare公式ドキュメントに binding 必須という明記は
+        // 見つけられていない。実害は無いため残すが、`npx wrangler versions upload
+        // --dry-run` で binding を外しても通るか確認できれば確定させたい
+        // （UAT 集約Issue #13 の対象外の軽微な確認。時間があれば実施）。
+        "name": "TENANT_DO",
+        "class_name": "TenantDurableObject"
+      }
+    ]
+  },
+  // Durable Object クラスのライフサイクル宣言。クラスを「定義する」ワーカー側
+  // （このワーカー）に置く。root の wrangler.jsonc 側はクロスワーカー参照
+  // （script_name: "uotage-tenant-do"）なので、ここには migrations を書かない
+  // （Cloudflare Durable Objects Class Migrations のドキュメント参照。
+  // クラスを export するワーカーだけが migrations を持つ）。
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TenantDurableObject"]
+    }
+  ],
+  "d1_databases": [
+    {
+      // root の wrangler.jsonc と同じ D1 データベースを指す（テナント横断で
+      // 1つの共有 D1）。database_id は実インフラ作成後の実値に差し替える必要がある
+      // （このIssueでは `wrangler d1 create` を実行していない。未検証: UAT #13 へ）。
+      "binding": "DB",
+      "database_name": "uotage-db",
+      "database_id": "REPLACE_WITH_REAL_D1_DATABASE_ID"
+    }
+  ]
+  // Workers Secrets・vars は今のところ無い（D1 バインディングのみで完結する）。
+}

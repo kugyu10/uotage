@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "types": ["@cloudflare/workers-types"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    // ../../../src/lib 配下を .ts 拡張子つきで import する（root と同じく
+    // node の型ストリッピング前提の実行系に合わせるため、拡張子を省略しない）。
+    "allowImportingTsExtensions": true
+  },
+  // src/index.ts はテナント境界の強制ロジック・移植済みの純粋関数を
+  // ../../../src/lib から import する（重複実装を避けるため）。それらの型も
+  // ここで一緒に検査対象になる（tsc は import グラフを辿るので include に無くても検査される）。
+  "include": ["src/**/*.ts", "../../src/lib/d1/tenant-db.ts", "../../src/lib/purchases/process-stripe-purchase.ts"]
+}
