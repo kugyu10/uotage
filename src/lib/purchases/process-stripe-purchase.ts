@@ -126,7 +126,11 @@ export function computeStepScheduledAt(registeredAtIso: string, delayMinutes: nu
   return jstWallClockToUtcIso(year, month, day, sendAtHour);
 }
 
-function addHoursIso(isoUtc: string, hours: number): string {
+/**
+ * issue #29 register_reader 移植 (../readers/register-reader.ts) が deadline_at の
+ * 計算に同じロジックを必要とするため export する（重複実装を避ける。ロジック自体の変更ではない）。
+ */
+export function addHoursIso(isoUtc: string, hours: number): string {
   return new Date(new Date(isoUtc).getTime() + hours * 60 * 60 * 1000).toISOString();
 }
 
